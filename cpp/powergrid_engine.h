@@ -205,6 +205,9 @@ class State {
   std::string ActionToString(int a) const;
   std::string Describe() const;       // plain-text view, also usable as an LLM observation
   std::string Dump() const;           // canonical form compared by tools/difftest.py
+  // Structured view of everything public (all of it: money is public) as JSON,
+  // for scripted bots and as LLM input.
+  std::string ToJson() const;
   void CheckInvariants() const;       // throws std::logic_error on violation
 
   static int ObservationSize(const Rules& rules);
@@ -218,6 +221,11 @@ class State {
   int num_cities_of(int p) const;
   std::vector<int> purchasable() const;
   int MinBid(int plant) const;  // 1 for the discounted plant
+  int Price(int f) const;       // next unit of fuel f, -1 when sold out
+  int BuildCost(int p, int city) const;  // -1 when p may not build there now
+  // Cheapest connection cost between two cities through the cities in play
+  // (kUnreachable if either is out of play or regions are not chosen yet).
+  int Distance(int a, int b) const;
 
   // Number of initial-order chance outcomes (n!).
   static int NumOrders(int n);
@@ -282,13 +290,11 @@ class State {
   bool Occupies(int c, int who) const;
   int MaxCities() const;
   int Starter() const;
-  int Price(int f) const;  // -1 when sold out
   void Capacity(int p, std::array<int, kNumFuels>* cap, int* hybrid) const;
   bool Fits(int p, const std::array<int16_t, kNumFuels>& stored) const;
   std::vector<int> TrimOptions(int p) const;
   void ReturnFuel(int p, int f, bool forced);
   void ContinueTrim();
-  int BuildCost(int p, int city) const;  // -1 when not allowed
   std::vector<int> TrustSetupOptions() const;
   bool CardsLeft() const;
   int MarketTarget() const;

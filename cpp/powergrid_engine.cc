@@ -586,6 +586,11 @@ int State::BuildCost(int p, int c) const {
   return rules_->slot_costs[nocc] + conn;
 }
 
+int State::Distance(int a, int b) const {
+  if (d_.region_set < 0) return kUnreachable;
+  return rules_->region_dist[d_.region_set][a * rules_->map.num_cities + b];
+}
+
 std::vector<int> State::TrustSetupOptions() const {
   // The first Trust house goes anywhere in play, the others next to an earlier
   // one (one connection away). Falls back to any empty city.
@@ -1583,6 +1588,92 @@ std::string State::Dump() const {
   } else {
     os << "-";
   }
+  return os.str();
+}
+
+std::string State::ToJson() const {
+  static const char* kPhaseNames[] = {"CHANCE",          "TRUST_SETUP",  "AUCTION_SELECT",
+                                      "AUCTION_BID",     "AUCTION_DISCARD", "FUEL_DISCARD",
+                                      "BUY_FUEL",        "BUILD",        "BUREAUCRACY",
+                                      "GAME_OVER"};
+  const Rules& r = *rules_;
+  std::ostringstream os;
+  auto list = [&](const std::vector<int>& v) { os << ListStr(v); };
+  auto plant_json = [&](int num) {
+    const Plant& pl = plant(num);
+    os << "{\"number\":" << num << ",\"kind\":\"" << kKindNames[pl.kind]
+       << "\",\"need\":" << pl.need << ",\"power\":" << pl.power << "}";
+  };
+  os << "{\"round\":" << d_.round << ",\"step\":" << int(d_.step) << ",\"phase\":\""
+     << kPhaseNames[static_cast<int>(d_.phase)] << "\",\"current_player\":" << CurrentPlayer()
+     << ",\"num_players\":" << n_ << ",\"regions\":";
+  if (d_.region_set >= 0) list(r.region_sets[d_.region_set]);
+  else os << "null";
+  os << ",\"order\":";
+  list(std::vector<int>(d_.order.begin(), d_.order.begin() + n_));
+  os << ",\"players\":[";
+  for (int p = 0; p < n_; ++p) {
+    os << (p ? "," : "") << "{\"money\":" << d_.money[p] << ",\"plants\":[";
+    for (int j = 0; j < d_.num_plants[p]; ++j) {
+      if (j) os << ",";
+      plant_json(d_.plants[p][j]);
+    }
+    os << "],\"stored\":";
+    list(std::vector<int>(d_.stored[p].begin(), d_.stored[p].end()));
+    os << ",\"cities\":";
+    list(Bits(d_.cities[p]));
+    os << ",\"powered\":" << d_.powered[p] << ",\"done_auction\":"
+       << ((d_.done_auction >> p) & 1 ? "true" : "false") << "}";
+  }
+  os << "],\"market\":[";
+  std::vector<int> buyable = purchasable();
+  int k = 0;
+  for (int num : Bits(d_.market)) {
+    if (k) os << ",";
+    const Plant& pl = plant(num);
+    os << "{\"number\":" << num << ",\"kind\":\"" << kKindNames[pl.kind]
+       << "\",\"need\":" << pl.need << ",\"power\":" << pl.power
+       << ",\"current\":" << (k < static_cast<int>(buyable.size()) ? "true" : "false")
+       << ",\"min_bid\":" << MinBid(num) << "}";
+    ++k;
+  }
+  os << "],\"discount\":" << (d_.discount ? std::to_string(d_.discount) : "null")
+     << ",\"step3_card_in_market\":" << (d_.step3_pending ? "true" : "false")
+     << ",\"stack_cards\":" << d_.real_plug + d_.real_socket + (d_.top_pending ? 1 : 0)
+     << ",\"top_is_plug\":" << (d_.top_pending ? "true" : "false") << ",\"fuel_market\":";
+  list(std::vector<int>(d_.fuel_market.begin(), d_.fuel_market.end()));
+  os << ",\"fuel_price\":[";
+  for (int f = 0; f < kNumFuels; ++f) {
+    int pr = Price(f);
+    os << (f ? "," : "") << (pr < 0 ? std::string("null") : std::to_string(pr));
+  }
+  os << "],\"uranium_stopped\":" << (d_.uranium_stopped ? "true" : "false") << ",\"auction\":";
+  if (d_.auction_active) {
+    const Auction& au = d_.auction;
+    os << "{\"plant\":" << int(au.plant) << ",\"selector\":" << int(au.selector)
+       << ",\"bid\":" << au.bid << ",\"high\":"
+       << (au.high < 0 ? std::string("null") : std::to_string(au.high)) << ",\"ring\":";
+    list(std::vector<int>(au.ring.begin(), au.ring.begin() + au.ring_len));
+    os << "}";
+  } else {
+    os << "null";
+  }
+  os << ",\"occupants\":[";
+  for (int c = 0; c < r.map.num_cities; ++c) {
+    os << (c ? "," : "");
+    list(std::vector<int>(d_.occupants[c].begin(), d_.occupants[c].begin() + d_.num_occupants[c]));
+  }
+  os << "],\"trust\":";
+  if (r.has_trust()) {
+    os << "{\"plants\":";
+    list(Bits(d_.trust_plants));
+    os << ",\"houses\":" << int(d_.trust_houses) << "}";
+  } else {
+    os << "null";
+  }
+  os << ",\"rules\":{\"step2_cities\":" << r.step2_cities << ",\"end_cities\":"
+     << r.end_cities << ",\"plant_limit\":" << r.plant_limit << ",\"houses\":" << r.houses
+     << ",\"max_rounds\":" << r.max_rounds << "}}";
   return os.str();
 }
 

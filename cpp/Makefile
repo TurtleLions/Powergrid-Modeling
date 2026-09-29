@@ -5,6 +5,16 @@ BIN := build
 
 all: $(BIN)/powergrid_trace $(BIN)/powergrid_bench
 
+# Python bindings (pgcore) for bots and training; needs pybind11 and Python headers.
+PYTHON ?= $(HOME)/.local/opt/python311/bin/python3
+PGCORE := $(BIN)/pgcore$(shell $(PYTHON) -c "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))")
+
+pgcore: $(PGCORE)
+
+$(PGCORE): python/pgcore.cc powergrid_engine.cc powergrid_engine.h powergrid_data.inc | $(BIN)
+	$(CXX) -std=c++17 -O3 -g -Wall -Wextra -shared -fPIC \
+	  $(shell $(PYTHON) -m pybind11 --includes) -o $@ python/pgcore.cc powergrid_engine.cc
+
 $(BIN)/%: %.cc powergrid_engine.cc powergrid_engine.h powergrid_data.inc | $(BIN)
 	$(CXX) $(CXXFLAGS) -o $@ $< powergrid_engine.cc
 
@@ -22,4 +32,4 @@ bench: $(BIN)/powergrid_bench
 clean:
 	rm -rf $(BIN)
 
-.PHONY: all check bench clean
+.PHONY: all pgcore check bench clean
