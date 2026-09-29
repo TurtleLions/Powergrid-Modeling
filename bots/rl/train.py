@@ -16,7 +16,8 @@ Half of the single-learner games seat three copies of one opponent type, the
 same setup as the worst-case evaluation (bots/evaluate.py). Opponent types the
 learner does badly against are drawn more often (prioritised fictitious
 self-play); the evaluation's per-opponent win rates reset those priorities.
-best.pt is always the checkpoint with the best worst case, not the latest.
+best.pt is the checkpoint with the best worst case among those that also hold
+their own against the previous best, not the latest.
 
 Reward: the final share of the win (1 for a sole winner), plus optional
 potential-based shaping on min(cities, capacity), which speeds learning
@@ -78,7 +79,7 @@ class Config:
     hof_size: int = 6             # hall of fame: strongest earlier versions
     hof_min_vs_best: float = 0.22 # admission: win rate vs 3 copies of the current best
     eval_every: int = 25
-    eval_games: int = 100         # per opponent type
+    eval_games: int = 200         # per opponent type
     seed: int = 0
     init: str = ""                # checkpoint to start from (widened if older features)
     features: int = FEATURE_VERSION
@@ -310,9 +311,13 @@ def main():
         ev = evaluate(path, cfg, it, hof.best())
         for o, w in ev["per_opponent"].items():
             win_vs[o] = w                      # exact rates reset the priorities
-        if "vs_best" not in ev or ev["vs_best"] >= cfg.hof_min_vs_best:
+        strong = "vs_best" not in ev or ev["vs_best"] >= cfg.hof_min_vs_best
+        if strong:
             ev["hof_admitted"] = hof.consider(net, it, ev["worst"])
-        if not os.path.exists(best_path) or ev["worst"] >= max(m["score"] for m in hof.members):
+        # best.pt: the best worst case among checkpoints that also hold their own
+        # against the previous best (so it cannot regress head-to-head)
+        if not os.path.exists(best_path) or (
+                strong and ev["worst"] >= max(m["score"] for m in hof.members)):
             save(best_path, net, iteration=it, score=ev["worst"])
             ev["new_best"] = True
         return ev
