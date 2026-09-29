@@ -5,14 +5,22 @@ league (a bot that only ever meets itself overfits to itself), baselines for
 evaluation, and a sanity check that learning agents beat sensible play, not
 just random moves.
 
+Styles differ in strategy, not just in numbers: which plant types they
+favour, how much fuel they hoard (denying it to others), how they pick cities
+(cheapest, keep room to grow, or crowd opponents), whether they drive up
+prices in auctions they do not want to win, and whether they stay small to go
+first in the turn order before rushing the end. `randomized` draws a fresh
+style every game, for broad coverage in the RL league.
+
 Each decision is recomputed from the public state, so the bots are stateless
 except for the plan of which plants to run in the current bureaucracy.
 """
 from __future__ import annotations
 
+import dataclasses
 import itertools
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .base import Agent, view
 
@@ -29,8 +37,13 @@ class Style:
     power_value: float   # Elektro of worth per city of added capacity
     overbuild: int       # cities built beyond generating capacity
     cash_floor: int      # money kept back when building
-    fuel_runs: float     # plant runs of fuel to keep in stock
+    fuel_runs: float     # plant runs of fuel to keep in stock (2 = fill storage)
     upgrade_margin: int  # capacity gain needed to buy a plant when not short
+    kind_bonus: Tuple[Tuple[str, float], ...] = ()  # extra worth for plant kinds
+    city_mode: str = "cheap"   # cheap | room (keep room to grow) | block (crowd rivals)
+    drive_up: float = 0.0      # in auctions it does not want, raise to this x face value
+    rush_margin: int = 0       # >0: stay behind the leader until the leader is this
+    #                            close to the end, then build as much as possible
 
 
 STYLES: Dict[str, Style] = {
@@ -38,12 +51,32 @@ STYLES: Dict[str, Style] = {
     "builder": Style("builder", 0.9, 5.0, 2, 0, 1.0, 2),
     "tycoon": Style("tycoon", 1.35, 9.0, -1, 20, 1.5, 1),
     "miser": Style("miser", 0.7, 4.0, 0, 30, 1.0, 2),
+    "eco": Style("eco", 1.0, 6.0, 1, 10, 1.0, 1, kind_bonus=(("eco", 18.0), ("uranium", -10.0))),
+    "nuclear": Style("nuclear", 1.1, 6.0, 1, 10, 1.5, 1, kind_bonus=(("uranium", 14.0),)),
+    "hoarder": Style("hoarder", 1.0, 6.0, 1, 5, 2.0, 1),
+    "blocker": Style("blocker", 1.0, 6.0, 1, 5, 1.0, 1, city_mode="block"),
+    "planner": Style("planner", 1.0, 6.0, 1, 10, 1.0, 1, city_mode="room"),
+    "driver": Style("driver", 1.0, 6.0, 1, 10, 1.0, 1, drive_up=0.9),
+    "turtle": Style("turtle", 1.1, 7.0, 2, 15, 1.2, 1, rush_margin=4),
 }
+RANDOMIZED = "randomized"
+
+
+def random_style(rng) -> Style:
+    """A fresh style for one game, drawn across the range the named styles span."""
+    bonus = tuple((k, rng.uniform(-10.0, 18.0)) for k in ("eco", "uranium", "hybrid", "garbage")
+                  if rng.random() < 0.3)
+    return Style(RANDOMIZED, rng.uniform(0.6, 1.5), rng.uniform(3.0, 10.0), rng.randint(-1, 3),
+                 rng.randint(0, 35), rng.uniform(1.0, 2.0), rng.randint(1, 3), kind_bonus=bonus,
+                 city_mode=rng.choice(["cheap", "cheap", "room", "block"]),
+                 drive_up=rng.choice([0.0, 0.0, 0.0, 0.7, 0.9]),
+                 rush_margin=rng.choice([0, 0, 0, 3, 5]))
 
 
 class HeuristicAgent(Agent):
     def __init__(self, style: str = "balanced"):
-        self.style = STYLES[style]
+        self.randomized = style == RANDOMIZED
+        self.style = None if self.randomized else STYLES[style]
         self.name = style
         self._plan_key = None
         self._plan: List[int] = []
@@ -52,6 +85,8 @@ class HeuristicAgent(Agent):
         super().reset(rules, seat, rng)
         self.c = rules.codec
         self._plan_key = None
+        if self.randomized:
+            self.style = random_style(rng)
 
     # ---- valuation helpers ------------------------------------------------
     @staticmethod
@@ -75,6 +110,7 @@ class HeuristicAgent(Agent):
         if gain <= 0:
             return 0.0
         worth = pl["number"] + self.style.power_value * gain - self._run_cost(pl, prices)
+        worth += dict(self.style.kind_bonus).get(pl["kind"], 0.0)
         if pl["kind"] == "uranium" and v.get("uranium_stopped"):
             worth -= 15                         # no more uranium resupply
         return self.style.bid_mult * worth
@@ -131,9 +167,13 @@ class HeuristicAgent(Agent):
         limit = min(me["money"], int(self._worth(pl, v)))
         if au["high"] is None:                       # we opened: bid the minimum
             return c["BID0"] + pl["min_bid"]
-        if not self._wants_plant(pl, v) and c["PASS"] in legal:
-            return c["PASS"]
         nxt = au["bid"] + 1
+        if not self._wants_plant(pl, v) and c["PASS"] in legal:
+            # price driving: make the others pay, but stop well below face value
+            drive = int(self.style.drive_up * (pl["number"] + 5 * pl["power"]))
+            if self.style.drive_up and nxt <= min(drive, me["money"]) and c["BID0"] + nxt in legal:
+                return c["BID0"] + nxt
+            return c["PASS"]
         if nxt <= limit and c["BID0"] + nxt in legal:
             return c["BID0"] + nxt
         return c["PASS"]
@@ -178,9 +218,13 @@ class HeuristicAgent(Agent):
         n_cities = len(me["cities"])
         capacity = sum(pl["power"] for pl in me["plants"])
         target = max(capacity + self.style.overbuild, 1)
+        end = v["rules"]["end_cities"]
+        leader = max(len(p["cities"]) for i, p in enumerate(v["players"]) if i != self.seat)
+        if self.style.rush_margin and leader < end - self.style.rush_margin:
+            # stay behind the leader: go early when buying fuel and building
+            target = min(target, max(leader - 1, 2))
         if n_cities >= target:
             return c["DONE"]
-        end = v["rules"]["end_cities"]
         if n_cities + 1 >= end and v["round"] < 30:
             # only end the game when we would be the one powering the most cities
             # (after round 30, end it regardless so games cannot stall)
@@ -195,11 +239,19 @@ class HeuristicAgent(Agent):
         affordable = [x for x in builds if me["money"] - cost[x] >= self.style.cash_floor]
         if not affordable:
             return c["DONE"]
-        if n_cities == 0:
-            # start where many cheap cities are close by
-            def room(city):
-                return sum(1 for o in builds if o != city and state.distance(city, o) <= 12)
-            return c["BUILD0"] + max(affordable, key=lambda x: (room(x), -cost[x], -x))
+        def room(city):   # free cities close by: room to grow
+            return sum(1 for o in builds if o != city and state.distance(city, o) <= 12)
+
+        rivals = [c_ for i, p in enumerate(v["players"]) if i != self.seat for c_ in p["cities"]]
+
+        def crowding(city):   # rival cities close by
+            return sum(1 for o in rivals if state.distance(city, o) <= 8)
+
+        mode = self.style.city_mode
+        if mode == "block" and rivals:
+            return c["BUILD0"] + min(affordable, key=lambda x: (cost[x] - 4 * crowding(x), x))
+        if n_cities == 0 or mode == "room":
+            return c["BUILD0"] + min(affordable, key=lambda x: (cost[x] - 3 * room(x), x))
         return c["BUILD0"] + min(affordable, key=lambda x: (cost[x], x))
 
     def _run(self, state, v, legal):
@@ -246,7 +298,8 @@ class HeuristicAgent(Agent):
 
 
 def make(name: str) -> Agent:
-    """Agent by registry name: a style name, "random", or "rl:<checkpoint.pt>"."""
+    """Agent by registry name: a style name, "randomized", "random", or
+    "rl:<checkpoint.pt>"."""
     from .base import RandomAgent
     if name == "random":
         return RandomAgent()

@@ -1,14 +1,22 @@
 """PPO with a league of opponents for Power Grid.
 
-    python3 -m bots.rl.train --out runs/first --iterations 200
+    python3 -m bots.rl.train --out runs/league --iterations 1000
+    python3 -m bots.rl.train --out runs/league2 --init runs/league/best.pt
 
 Each iteration, worker processes play complete games and the learner updates
 on them. The seats the learner does not control are filled from a league:
-pure self-play (every seat the current policy), the scripted styles, a random
-player, and frozen snapshots of earlier versions. Opponent types the learner
-does poorly against are drawn more often (prioritised fictitious self-play),
-which is what pushes it towards a strategy that beats any kind of opponent
-rather than just itself.
+
+  * pure self-play (every seat the current policy);
+  * every scripted style, the per-game `randomized` style, and a little random;
+  * a hall of fame of the strongest earlier versions (ranked by their
+    worst-case win rate against the scripted styles, and only admitted if they
+    hold their own against the previous best), plus a few recent snapshots.
+
+Half of the single-learner games seat three copies of one opponent type, the
+same setup as the worst-case evaluation (bots/evaluate.py). Opponent types the
+learner does badly against are drawn more often (prioritised fictitious
+self-play); the evaluation's per-opponent win rates reset those priorities.
+best.pt is always the checkpoint with the best worst case, not the latest.
 
 Reward: the final share of the win (1 for a sole winner), plus optional
 potential-based shaping on min(cities, capacity), which speeds learning
@@ -36,8 +44,8 @@ from torch import nn
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "cpp", "build"))
 import pgcore  # noqa: E402
 
-from .. import arena  # noqa: E402
-from ..heuristic import STYLES, make  # noqa: E402
+from ..evaluate import DEFAULT_OPPONENTS, worst_case  # noqa: E402
+from ..heuristic import make  # noqa: E402
 from .features import AbstractActions, Encoder  # noqa: E402
 from .model import PolicyValueNet, RLAgent, load, save  # noqa: E402
 
@@ -62,11 +70,15 @@ class Config:
     lam: float = 0.95
     shaping: float = 0.2          # potential scale; 0 = pure win/loss reward
     p_selfplay: float = 0.3       # games where the learner plays every seat
-    p_two_seats: float = 0.3      # otherwise, learner plays two seats instead of one
+    p_two_seats: float = 0.2      # otherwise, learner plays two seats instead of one
+    p_same_table: float = 0.5     # single-learner games: all opponents one type
+    pfsp_power: float = 2.0       # how hard to focus on opponents the learner loses to
     snapshot_every: int = 10
-    max_snapshots: int = 8
-    eval_every: int = 10
-    eval_games: int = 400
+    recent_snapshots: int = 3     # most recent snapshots in the league
+    hof_size: int = 6             # hall of fame: strongest earlier versions
+    hof_min_vs_best: float = 0.22 # admission: win rate vs 3 copies of the current best
+    eval_every: int = 25
+    eval_games: int = 100         # per opponent type
     seed: int = 0
     init: str = ""                # checkpoint to start from
 
@@ -109,7 +121,10 @@ def _rollout(job):
             lineup = [LEARNER] * n
         else:
             k = 2 if (rng.random() < cfg.p_two_seats and n > 2) else 1
-            lineup = [LEARNER] * k + rng.choices(names, weights_, k=n - k)
+            if k == 1 and rng.random() < cfg.p_same_table:
+                lineup = [LEARNER] + [rng.choices(names, weights_)[0]] * (n - 1)
+            else:
+                lineup = [LEARNER] * k + rng.choices(names, weights_, k=n - k)
             rng.shuffle(lineup)
         seats = {}
         for seat, who in enumerate(lineup):
@@ -215,17 +230,51 @@ def ppo_update(net, opt, data, cfg) -> dict:
     return {k: v / steps for k, v in stats.items()}
 
 
-def evaluate(path: str, cfg: Config, games: int, seed: int) -> dict:
-    """Win rate of the checkpoint (greedy) against fields of scripted bots."""
+def evaluate(path: str, cfg: Config, seed: int, best: str = "") -> dict:
+    """Worst case of the checkpoint (greedy) over the scripted opponent types,
+    and its win rate against three copies of the current best checkpoint."""
     focus = "rl:" + path
-    out = {}
-    res = arena.run(list(STYLES), cfg.players, games, seed, focus=focus, procs=cfg.workers,
-                    start="spawn")
-    out["vs_scripted_field"] = round(res[focus]["win_rate"], 3)
-    res = arena.run(["random"], cfg.players, games // 4, seed + 1, focus=focus, procs=cfg.workers,
-                    start="spawn")
-    out["vs_random"] = round(res[focus]["win_rate"], 3)
+    res = worst_case(focus, DEFAULT_OPPONENTS, cfg.players, cfg.eval_games, seed,
+                     procs=cfg.workers, start="spawn")
+    out = {"worst": round(res["worst"], 3), "worst_opponent": res["worst_opponent"],
+           "mean": round(res["mean"], 3),
+           "per_opponent": {o: round(p["win_rate"], 3) for o, p in res["per_opponent"].items()}}
+    if best:
+        res = worst_case(focus, ["rl:" + best], cfg.players, cfg.eval_games, seed + 1,
+                         procs=cfg.workers, start="spawn")
+        out["vs_best"] = round(res["worst"], 3)
     return out
+
+
+class HallOfFame:
+    """The strongest earlier versions, by worst-case score; kept on disk."""
+
+    def __init__(self, out: str, size: int):
+        self.dir = os.path.join(out, "hof")
+        os.makedirs(self.dir, exist_ok=True)
+        self.index = os.path.join(self.dir, "index.json")
+        self.size = size
+        self.members = json.load(open(self.index)) if os.path.exists(self.index) else []
+
+    def paths(self) -> List[str]:
+        return [m["path"] for m in self.members]
+
+    def best(self) -> str:
+        return max(self.members, key=lambda m: m["score"])["path"] if self.members else ""
+
+    def consider(self, net, it: int, score: float) -> bool:
+        if len(self.members) >= self.size and score <= min(m["score"] for m in self.members):
+            return False
+        path = os.path.join(self.dir, f"it{it:05d}.pt")
+        save(path, net, iteration=it, score=score)
+        self.members.append({"path": path, "iteration": it, "score": score})
+        self.members.sort(key=lambda m: -m["score"])
+        for m in self.members[self.size:]:
+            if os.path.exists(m["path"]):
+                os.remove(m["path"])
+        self.members = self.members[:self.size]
+        json.dump(self.members, open(self.index, "w"), indent=1)
+        return True
 
 
 def main():
@@ -243,18 +292,37 @@ def main():
     opt = torch.optim.Adam(net.parameters(), lr=cfg.lr)
     print(f"obs {enc.size}, actions {acts.n}, params {sum(p.numel() for p in net.parameters()):,}")
 
-    pool_scripted = list(STYLES) + ["random"]
+    pool_scripted = DEFAULT_OPPONENTS + ["random"]
     win_vs = defaultdict(lambda: 0.5)          # EMA of learner result per opponent kind
+    hof = HallOfFame(cfg.out, cfg.hof_size)
+    best_path = os.path.join(cfg.out, "best.pt")
+
+    def run_eval(it: int) -> dict:
+        path = os.path.join(cfg.out, "latest.pt")
+        ev = evaluate(path, cfg, it, hof.best())
+        for o, w in ev["per_opponent"].items():
+            win_vs[o] = w                      # exact rates reset the priorities
+        if "vs_best" not in ev or ev["vs_best"] >= cfg.hof_min_vs_best:
+            ev["hof_admitted"] = hof.consider(net, it, ev["worst"])
+        if not os.path.exists(best_path) or ev["worst"] >= max(m["score"] for m in hof.members):
+            save(best_path, net, iteration=it, score=ev["worst"])
+            ev["new_best"] = True
+        return ev
+
+    if cfg.init:
+        save(os.path.join(cfg.out, "latest.pt"), net, iteration=0)
+        ev = run_eval(0)
+        print(json.dumps({"iter": 0, "eval": ev}), flush=True)
     log = open(os.path.join(cfg.out, "log.jsonl"), "a")
     rng = random.Random(cfg.seed)
     ctx = mp.get_context("spawn")   # forking after PyTorch has started can deadlock
     with ctx.Pool(cfg.workers) as pool:
         for it in range(1, cfg.iterations + 1):
             t0 = time.time()
-            snaps = sorted(glob.glob(os.path.join(cfg.out, "snap_*.pt")))[-cfg.max_snapshots:]
-            league = pool_scripted + snaps
+            snaps = sorted(glob.glob(os.path.join(cfg.out, "snap_*.pt")))[-cfg.recent_snapshots:]
+            league = pool_scripted + hof.paths() + [s for s in snaps if s not in hof.paths()]
             # prioritise opponents the learner does badly against
-            opponents = [(o, (1.05 - win_vs[o]) ** 2 * (0.25 if o == "random" else 1.0))
+            opponents = [(o, (1.05 - win_vs[o]) ** cfg.pfsp_power * (0.25 if o == "random" else 1.0))
                          for o in league]
             buf = io.BytesIO()
             torch.save(net.state_dict(), buf)
@@ -283,7 +351,8 @@ def main():
             if it % cfg.snapshot_every == 0:
                 save(os.path.join(cfg.out, f"snap_{it:05d}.pt"), net, iteration=it)
             if it % cfg.eval_every == 0 or it == cfg.iterations:
-                rec["eval"] = evaluate(os.path.join(cfg.out, "latest.pt"), cfg, cfg.eval_games, it)
+                rec["eval"] = run_eval(it)
+            rec["league"] = {"hof": len(hof.paths()), "snapshots": len(snaps)}
             log.write(json.dumps(rec) + "\n")
             log.flush()
             print(json.dumps(rec), flush=True)
