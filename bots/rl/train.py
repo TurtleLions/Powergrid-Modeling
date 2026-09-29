@@ -12,7 +12,9 @@ on them. The seats the learner does not control are filled from a league:
     worst-case win rate against the scripted styles, and only admitted if they
     hold their own against the previous best), plus a few recent snapshots.
 
-Half of the single-learner games seat three copies of one opponent type, the
+Opponents are drawn in two stages: scripted styles or past versions (at a
+fixed ratio, --p-scripted), then by priority within that group. Half of the
+single-learner games seat three copies of one opponent type, the
 same setup as the worst-case evaluation (bots/evaluate.py). Opponent types the
 learner does badly against are drawn more often (prioritised fictitious
 self-play); the evaluation's per-opponent win rates reset those priorities.
@@ -73,6 +75,7 @@ class Config:
     p_selfplay: float = 0.3       # games where the learner plays every seat
     p_two_seats: float = 0.2      # otherwise, learner plays two seats instead of one
     p_same_table: float = 0.5     # single-learner games: all opponents one type
+    p_scripted: float = 0.5       # opponent draws: scripted styles vs past versions
     pfsp_power: float = 2.0       # how hard to focus on opponents the learner loses to
     snapshot_every: int = 10
     recent_snapshots: int = 3     # most recent snapshots in the league
@@ -115,8 +118,16 @@ def _rollout(job):
     net = PolicyValueNet(enc.size, acts.n, cfg.hidden)
     net.load_state_dict(torch.load(io.BytesIO(weights), weights_only=False))
     net.eval()
-    names = [o for o, _ in opponents]
-    weights_ = [w for _, w in opponents]
+    groups = [g for g in (opponents["scripted"], opponents["past"]) if g]
+
+    def pick() -> str:
+        """Two stages: scripted vs past versions at a fixed ratio, so no number
+        of checkpoints can crowd out the scripted styles; then PFSP within."""
+        if len(groups) == 2:
+            g = groups[0] if rng.random() < cfg.p_scripted else groups[1]
+        else:
+            g = groups[0]
+        return rng.choices([o for o, _ in g], [w for _, w in g])[0]
     batch = defaultdict(list)
     results = []
     for _ in range(cfg.games_per_worker):
@@ -126,9 +137,9 @@ def _rollout(job):
         else:
             k = 2 if (rng.random() < cfg.p_two_seats and n > 2) else 1
             if k == 1 and rng.random() < cfg.p_same_table:
-                lineup = [LEARNER] + [rng.choices(names, weights_)[0]] * (n - 1)
+                lineup = [LEARNER] + [pick()] * (n - 1)
             else:
-                lineup = [LEARNER] * k + rng.choices(names, weights_, k=n - k)
+                lineup = [LEARNER] * k + [pick() for _ in range(n - k)]
             rng.shuffle(lineup)
         seats = {}
         for seat, who in enumerate(lineup):
@@ -304,7 +315,7 @@ def main():
     print(f"obs {enc.size}, actions {acts.n}, params {sum(p.numel() for p in net.parameters()):,}")
 
     extra = [p for p in cfg.extra_opponents.split(",") if p]
-    pool_scripted = DEFAULT_OPPONENTS + ["random"] + extra
+    pool_scripted = DEFAULT_OPPONENTS + ["random"]
     win_vs = defaultdict(lambda: 0.5)          # EMA of learner result per opponent kind
     hof = HallOfFame(cfg.out, cfg.hof_size)
     best_path = os.path.join(cfg.out, "best.pt")
@@ -336,10 +347,12 @@ def main():
         for it in range(1, cfg.iterations + 1):
             t0 = time.time()
             snaps = sorted(glob.glob(os.path.join(cfg.out, "snap_*.pt")))[-cfg.recent_snapshots:]
-            league = pool_scripted + hof.paths() + [s for s in snaps if s not in hof.paths()]
+            past = extra + hof.paths() + [s for s in snaps if s not in hof.paths()]
             # prioritise opponents the learner does badly against
-            opponents = [(o, (1.05 - win_vs[o]) ** cfg.pfsp_power * (0.25 if o == "random" else 1.0))
-                         for o in league]
+            def weight(o):
+                return (1.05 - win_vs[o]) ** cfg.pfsp_power * (0.25 if o == "random" else 1.0)
+            opponents = {"scripted": [(o, weight(o)) for o in pool_scripted],
+                         "past": [(o, weight(o)) for o in past]}
             buf = io.BytesIO()
             torch.save(net.state_dict(), buf)
             jobs = [(cfg, buf.getvalue(), opponents, rng.randrange(1 << 30))
@@ -368,7 +381,7 @@ def main():
                 save(os.path.join(cfg.out, f"snap_{it:05d}.pt"), net, iteration=it)
             if it % cfg.eval_every == 0 or it == cfg.iterations:
                 rec["eval"] = run_eval(it)
-            rec["league"] = {"hof": len(hof.paths()), "snapshots": len(snaps)}
+            rec["league"] = {"hof": len(hof.paths()), "snapshots": len(snaps), "past": len(past)}
             log.write(json.dumps(rec) + "\n")
             log.flush()
             print(json.dumps(rec), flush=True)
