@@ -83,6 +83,8 @@ class Config:
     seed: int = 0
     init: str = ""                # checkpoint to start from (widened if older features)
     features: int = FEATURE_VERSION
+    extra_opponents: str = ""     # comma-separated checkpoints kept in the league (e.g. an
+    #                               earlier run's hall of fame); any feature version
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +303,8 @@ def main():
     opt = torch.optim.Adam(net.parameters(), lr=cfg.lr)
     print(f"obs {enc.size}, actions {acts.n}, params {sum(p.numel() for p in net.parameters()):,}")
 
-    pool_scripted = DEFAULT_OPPONENTS + ["random"]
+    extra = [p for p in cfg.extra_opponents.split(",") if p]
+    pool_scripted = DEFAULT_OPPONENTS + ["random"] + extra
     win_vs = defaultdict(lambda: 0.5)          # EMA of learner result per opponent kind
     hof = HallOfFame(cfg.out, cfg.hof_size)
     best_path = os.path.join(cfg.out, "best.pt")
