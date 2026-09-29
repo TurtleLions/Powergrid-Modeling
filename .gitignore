@@ -1,0 +1,6 @@
+cpp/build/
+__pycache__/
+# third-party material: rulebooks are copyrighted, the other project is not ours
+*.pdf
+main.zip
+next-powergrid-main/
