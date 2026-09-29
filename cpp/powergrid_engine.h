@@ -226,6 +226,9 @@ class State {
   // Cheapest connection cost between two cities through the cities in play
   // (kUnreachable if either is out of play or regions are not chosen yet).
   int Distance(int a, int b) const;
+  // Most cities p could power right now with their plants and stored fuel
+  // (what decides the winner when the game ends).
+  int MaxSupply(int p) const;
 
   // Number of initial-order chance outcomes (n!).
   static int NumOrders(int n);
@@ -298,7 +301,6 @@ class State {
   std::vector<int> TrustSetupOptions() const;
   bool CardsLeft() const;
   int MarketTarget() const;
-  int MaxSupply(int p) const;
   std::vector<int> RankedOrder() const;
   void SetOrder(const std::vector<int>& order);
 

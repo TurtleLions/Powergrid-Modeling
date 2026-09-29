@@ -66,6 +66,48 @@ class EncoderTests(unittest.TestCase):
         self.assertEqual(len(sizes), 1)
 
 
+class FeatureVersionTests(unittest.TestCase):
+    def test_v2_appends_to_v1_and_widening_keeps_the_policy(self):
+        import numpy as np
+        import torch
+        from bots.rl.model import PolicyValueNet, widen_input
+        rules = pgcore.Rules(players=4)
+        e1, e2 = Encoder(rules, 1), Encoder(rules, 2)
+        self.assertGreater(e2.size, e1.size)
+        acts = AbstractActions(rules)
+        torch.manual_seed(0)
+        net = PolicyValueNet(e1.size, acts.n, 64)
+        ref = PolicyValueNet(e1.size, acts.n, 64)
+        ref.load_state_dict(net.state_dict())
+        widen_input(net, e2.size, 2)
+        self.assertEqual(net.feature_version, 2)
+        for _, s in random_states(4, 1, seed=3):
+            p = s.current_player()
+            x1, x2 = e1.encode(s, p), e2.encode(s, p)
+            np.testing.assert_array_equal(x1, x2[:e1.size])
+            mask = torch.ones(1, acts.n, dtype=torch.bool)
+            with torch.no_grad():
+                l1, v1 = ref(torch.from_numpy(x1)[None], mask)
+                l2, v2 = net(torch.from_numpy(x2)[None], mask)
+            torch.testing.assert_close(l1, l2, atol=1e-4, rtol=1e-4)
+            torch.testing.assert_close(v1, v2, atol=1e-4, rtol=1e-4)
+
+    def test_max_supply_matches_what_decides_the_winner(self):
+        # at the end of a game, the winner has the highest (max_supply, money)
+        rules = pgcore.Rules(players=4)
+        rng = random.Random(9)
+        s = pgcore.State(rules)
+        while not s.is_terminal():
+            if s.is_chance_node():
+                o = s.chance_outcomes()
+                s.apply_action(rng.choices([a for a, _ in o], [p for _, p in o])[0])
+            else:
+                s.apply_action(rng.choice(s.legal_actions()))
+        key = [(s.max_supply(p), s.money(p)) for p in range(4)]
+        best = max(key)
+        self.assertEqual([r > 0 for r in s.returns()], [k == best for k in key])
+
+
 class ArenaTests(unittest.TestCase):
     def test_scripted_bots_play_legal_games_to_the_end(self):
         for players in (3, 4, 5):

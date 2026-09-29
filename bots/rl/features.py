@@ -3,6 +3,14 @@
 Features are ego-centric (the acting seat first) and padded to MAX_PLAYERS
 seats, so one network plays any player count on a given map.
 
+Feature versions: checkpoints record the version they were trained with, and
+new versions only APPEND features, so a network can be widened to a newer
+version without changing how it plays (see model.widen_input).
+  1  market, players, plants, fuel, auction, per-city occupancy and build cost
+  2  + end-game awareness: every player's powerable cities right now and
+       distance to the end, the margin "if the game ended now", and whether one
+       more city would end it
+
 Actions: the engine's flat action space has one action per bid amount (481 in
 all on the German map). Learning agents use ABSTRACT actions instead, where a
 bid is one of a few raises over the minimum legal bid; every other engine
@@ -17,6 +25,7 @@ from typing import List, Tuple
 import numpy as np
 
 MAX_PLAYERS = 6
+FEATURE_VERSION = 2   # current version; see the module docstring
 KINDS = ("coal", "oil", "garbage", "uranium", "hybrid", "eco")
 PHASES = ("CHANCE", "TRUST_SETUP", "AUCTION_SELECT", "AUCTION_BID", "AUCTION_DISCARD",
           "FUEL_DISCARD", "BUY_FUEL", "BUILD", "BUREAUCRACY", "GAME_OVER")
@@ -89,8 +98,11 @@ class AbstractActions:
 class Encoder:
     """Ego-centric feature vector for one seat."""
 
-    def __init__(self, rules):
+    def __init__(self, rules, version: int = FEATURE_VERSION):
+        if version not in (1, 2):
+            raise ValueError(f"unknown feature version {version}")
         self.rules = rules
+        self.version = version
         self.num_cities = rules.num_cities
         self.limit_slots = rules.plant_limit + 1
         self.size = len(self.encode_dummy())
@@ -158,4 +170,26 @@ class Encoder:
                       cost / 50.0 if cost >= 0 else -1.0]
             else:
                 f += [0.0] * 5
+        if self.version >= 2:
+            f += self._endgame(state, v, seat, n)
         return np.asarray(f, dtype=np.float32)
+
+    def _endgame(self, state, v, seat, n) -> List[float]:
+        """Who would win if the game ended now, and how close it is to ending."""
+        if not v:
+            return [0.0] * (2 * MAX_PLAYERS + 3)
+        end = v["rules"]["end_cities"]
+        supply = [state.max_supply(p) for p in range(n)]
+        f: List[float] = []
+        for i in range(MAX_PLAYERS):
+            if i < n:
+                p = (seat + i) % n
+                f += [supply[p] / 20.0, (end - len(v["players"][p]["cities"])) / end]
+            else:
+                f += [0.0, 0.0]
+        me = v["players"][seat]
+        best_other = max((supply[p], v["players"][p]["money"]) for p in range(n) if p != seat)
+        f += [(supply[seat] - best_other[0]) / 10.0,
+              float((supply[seat], me["money"]) > best_other),
+              float(len(me["cities"]) + 1 >= end)]
+        return f

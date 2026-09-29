@@ -46,8 +46,8 @@ import pgcore  # noqa: E402
 
 from ..evaluate import DEFAULT_OPPONENTS, worst_case  # noqa: E402
 from ..heuristic import make  # noqa: E402
-from .features import AbstractActions, Encoder  # noqa: E402
-from .model import PolicyValueNet, RLAgent, load, save  # noqa: E402
+from .features import FEATURE_VERSION, AbstractActions, Encoder  # noqa: E402
+from .model import PolicyValueNet, RLAgent, load, save, widen_input  # noqa: E402
 
 LEARNER = "learner"
 
@@ -80,7 +80,8 @@ class Config:
     eval_every: int = 25
     eval_games: int = 100         # per opponent type
     seed: int = 0
-    init: str = ""                # checkpoint to start from
+    init: str = ""                # checkpoint to start from (widened if older features)
+    features: int = FEATURE_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +108,7 @@ def _rollout(job):
     rng = random.Random(seed)
     torch.manual_seed(seed)
     rules = pgcore.Rules(players=cfg.players, map=cfg.map)
-    enc, acts = Encoder(rules), AbstractActions(rules)
+    enc, acts = Encoder(rules, cfg.features), AbstractActions(rules)
     net = PolicyValueNet(enc.size, acts.n, cfg.hidden)
     net.load_state_dict(torch.load(io.BytesIO(weights), weights_only=False))
     net.eval()
@@ -287,8 +288,15 @@ def main():
     torch.manual_seed(cfg.seed)
     torch.set_num_threads(min(16, os.cpu_count() or 1))
     rules = pgcore.Rules(players=cfg.players, map=cfg.map)
-    enc, acts = Encoder(rules), AbstractActions(rules)
-    net = load(cfg.init) if cfg.init else PolicyValueNet(enc.size, acts.n, cfg.hidden)
+    enc, acts = Encoder(rules, cfg.features), AbstractActions(rules)
+    if cfg.init:
+        net = load(cfg.init)
+        if net.feature_version != cfg.features:
+            print(f"widening {cfg.init} from features v{net.feature_version} to v{cfg.features}")
+            widen_input(net, enc.size, cfg.features)
+    else:
+        net = PolicyValueNet(enc.size, acts.n, cfg.hidden)
+        net.feature_version = cfg.features
     opt = torch.optim.Adam(net.parameters(), lr=cfg.lr)
     print(f"obs {enc.size}, actions {acts.n}, params {sum(p.numel() for p in net.parameters()):,}")
 

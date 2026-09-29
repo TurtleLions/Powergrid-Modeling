@@ -115,6 +115,8 @@ PYBIND11_MODULE(pgcore, m) {
       .def("price", &State::Price, "price of the next unit of fuel f, -1 if sold out")
       .def("min_bid", &State::MinBid)
       .def("distance", &State::Distance, "cheapest connection cost between two cities in play")
+      .def("max_supply", &State::MaxSupply,
+           "most cities player p could power now with their plants and stored fuel")
       .def("round", &State::round)
       .def("step", &State::step)
       .def("money", &State::money)
