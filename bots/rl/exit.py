@@ -5,19 +5,23 @@
 Each generation:
 
  1. Play games in which the learner's seats use tree search (bots/search.py)
-    with the current network, Dirichlet noise at the root for exploration.
+    with the BEST network so far (so a rejected generation cannot poison the
+    data), Dirichlet noise at the root for exploration.
     The other seats come from the league (scripted styles and past
     checkpoints), or every seat is the learner (--p-selfplay).
  2. Train the network to imitate the search -- cross-entropy to the root
     visit distribution at every searched decision -- and to predict the
-    final result (win share) at every decision the learner made. Training
-    reuses the last --buffer-gens generations of data.
+    final result (win share) at every decision the learner made. Decisions
+    that are not searched (fuel, running plants) are anchored to the
+    generating network's own policy, so improving auctions and building
+    cannot make the shared layers forget them. Training reuses the last
+    --buffer-gens generations of data.
  3. Gate: the new network (without search) plays three copies of the best
     network so far; best.pt advances only if it is not worse (>= 1/N). Its
     worst case against the scripted styles is logged for monitoring.
 
-Games always use the latest network, so improvement compounds: a sharper
-network makes a stronger search, which gives better targets.
+Improvement compounds: a sharper accepted network makes a stronger search,
+which gives better targets.
 """
 from __future__ import annotations
 
@@ -59,7 +63,7 @@ class Config:
     workers: int = max(1, (os.cpu_count() or 2) - 2)
     games_per_worker: int = 6
     sims: int = 100
-    root_noise: float = 0.25
+    root_noise: float = 0.15
     sample_rounds: int = 3        # sample moves in proportion to visits up to this round
     learner_seats: int = 2        # searched seats per game (unless self-play)
     p_selfplay: float = 0.25      # games where every seat is the searching learner
@@ -132,9 +136,10 @@ def _play(job):
             if len(legal) == 1:
                 state.apply_action(legal[0])
                 continue
+            prior, amap, _ = searcher._evaluate(state)
+            mask, _ = acts.mask_and_map(legal)
             if searcher.wants_search(state):
                 visits, amap = searcher.search(state)
-                mask, _ = acts.mask_and_map(legal)
                 pi = np.zeros(acts.n, dtype=np.float32)
                 total = sum(visits.values())
                 for x, c in visits.items():
@@ -149,7 +154,14 @@ def _play(job):
                     x = max(keys, key=lambda k: visits[k])
                 state.apply_action(amap[x])
             else:
-                state.apply_action(searcher._greedy(state))
+                # anchor: the generating network's own policy is the target
+                pi = np.zeros(acts.n, dtype=np.float32)
+                for x, p in prior.items():
+                    pi[x] = p
+                pol_obs.append(obs)
+                pol_mask.append(mask)
+                pol_pi.append(pi)
+                state.apply_action(amap[max(prior, key=prior.get)])
         returns = state.returns()
         for seat, idx in seat_vals.items():
             val_z.extend([(i, returns[seat]) for i in idx])
@@ -225,7 +237,7 @@ def main():
         for gen in range(1, cfg.generations + 1):
             t0 = time.time()
             buf = io.BytesIO()
-            torch.save(net.state_dict(), buf)
+            torch.save(load(best).state_dict(), buf)      # data from the best network
             jobs = [(cfg, buf.getvalue(), meta, scripted, past, rng.randrange(1 << 30))
                     for _ in range(cfg.workers)]
             parts, results = [], []
