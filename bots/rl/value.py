@@ -20,6 +20,8 @@ fit   trains a value network with a split by game, so the held-out numbers
       measure positions from games never seen in training:
         head   only the value layer (body frozen: the policy is unchanged)
         full   body and value layer (a separate value network for search)
+      --out is written only for an epoch that beats --init on the held-out
+      games, so fine-tuning never replaces a value network with a worse one.
       --aux-coef weights the margin target (a second output, dropped when the
       network is used as a plain value head).
 """
@@ -195,6 +197,9 @@ def fit(cfg: FitConfig):
     tr = ~te
     net = load(cfg.init)
     model = ValueFit(net)
+    aux_state = torch.load(cfg.init, map_location="cpu", weights_only=False).get("aux_state")
+    if aux_state is not None:                     # fine-tuning a fitted value network
+        model.aux.load_state_dict(aux_state)
     base = metrics(model, obs[te], win[te], margin[te], game[te], rounds[te], n_players)
     print(json.dumps({"epoch": 0, "held_out": base, "const_mse": round(float(np.var(win[te])), 4)}), flush=True)
     if cfg.mode == "head":
@@ -209,7 +214,7 @@ def fit(cfg: FitConfig):
     tr_idx = np.flatnonzero(tr)
     steps = len(tr_idx) // cfg.batch
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, cfg.epochs * steps)
-    best = None
+    best, best_m = base["mse"], None       # save only an improvement on the init network
     for epoch in range(1, cfg.epochs + 1):
         rng.shuffle(tr_idx)
         tot = np.zeros(2)
@@ -229,10 +234,12 @@ def fit(cfg: FitConfig):
         rec = {"epoch": epoch, "train_mse": round(tot[0] / steps, 4),
                "train_margin_mse": round(tot[1] / steps, 4), "held_out": held_m}
         print(json.dumps(rec), flush=True)
-        if cfg.out and (best is None or held_m["mse"] < best):
-            best = held_m["mse"]
-            save(cfg.out, net, value_fit=dataclasses.asdict(cfg), held_out=held_m, epoch=epoch,
-                 aux_state={k: v.clone() for k, v in model.aux.state_dict().items()})
+        if held_m["mse"] < best:
+            best, best_m = held_m["mse"], held_m
+            if cfg.out:
+                save(cfg.out, net, value_fit=dataclasses.asdict(cfg), held_out=held_m, epoch=epoch,
+                     aux_state={k: v.clone() for k, v in model.aux.state_dict().items()})
+    return {"base": base, "best": best_m}
 
 
 def main():
