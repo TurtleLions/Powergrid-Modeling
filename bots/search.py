@@ -1,11 +1,14 @@
 """Decision-time search on top of a trained policy/value network.
 
     make("mcts:100:runs/league3/champion.pt")   # 100 simulations per searched decision
+    make("mcts:100:runs/league3/champion.pt:runs/value1/big_aux05.pt")   # separate value net
+    make("mcts:100+norm+c3:runs/league3/champion.pt")   # options after the simulation count
 
 Monte Carlo tree search in the AlphaZero style, adapted to 2-6 players and
 chance: the network's policy is the prior over moves (PUCT), and leaves are
 scored by the value head from every seat's point of view, giving a vector of
-expected win shares. Each player in the tree picks the move best for itself
+expected win shares. The value can come from a separate network (value_path),
+e.g. one fitted by bots/rl/value.py, while the policy network supplies priors. Each player in the tree picks the move best for itself
 (max^n). Plant draws are chance nodes: every visit samples an outcome from
 the true probabilities, and each outcome gets its own subtree, so the search
 does not plan as if one sampled draw were certain. The engine's cheap state copy (under a
@@ -48,14 +51,25 @@ class Node:
 class SearchAgent(Agent):
     def __init__(self, path: str = "", sims: int = 100, c_puct: float = 1.5,
                  phases=SEARCH_PHASES, net=None, root_noise: float = 0.0,
-                 noise_alpha: float = 0.3):
+                 noise_alpha: float = 0.3, value_path: str = "", value_net=None,
+                 normalize_q: bool = False):
         """root_noise > 0 mixes Dirichlet(noise_alpha) noise into the root prior
-        (for exploration when generating training data; 0 for normal play)."""
+        (for exploration when generating training data; 0 for normal play).
+        value_path / value_net: score leaves with this network's value head
+        instead of the policy network's (same feature version).
+        normalize_q: rescale the mover's Q values at each node to [0, 1] over
+        its children (min-max, as in MuZero). Win shares differ by a few
+        hundredths between moves, far less than the exploration term, so
+        without this a confident prior is almost never overruled."""
         self.path = path
         self.sims = sims
         self.c_puct = c_puct
         self.phases = set(phases)
         self.net = net if net is not None else load(path)
+        self.normalize_q = normalize_q
+        self.value_net = value_net if value_net is not None else (load(value_path) if value_path else None)
+        if self.value_net is not None:
+            assert getattr(self.value_net, "feature_version", 1) == getattr(self.net, "feature_version", 1)
         self.root_noise = root_noise
         self.noise_alpha = noise_alpha
         self.name = f"mcts{sims}"
@@ -79,8 +93,15 @@ class SearchAgent(Agent):
         masks = np.ones((n, self.actions.n), dtype=np.bool_)
         mover = state.current_player()
         masks[mover] = mask
-        logits, values = self.net(torch.from_numpy(obs), torch.from_numpy(masks))
-        prior = torch.softmax(logits[mover], dim=0).numpy()
+        x = torch.from_numpy(obs)
+        if self.value_net is None:
+            logits, values = self.net(x, torch.from_numpy(masks))
+            logits = logits[mover]
+        else:
+            logits, _ = self.net(x[mover:mover + 1], torch.from_numpy(mask)[None])
+            logits = logits[0]
+            values = self.value_net.value(self.value_net.body(x)).squeeze(-1)
+        prior = torch.softmax(logits, dim=0).numpy()
         vals = np.clip(values.numpy().astype(np.float64), 1e-3, None)
         vals /= vals.sum()
         return {x: float(prior[x]) for x in amap}, amap, vals
@@ -167,6 +188,9 @@ class SearchAgent(Agent):
         mover = node.mover
         sqrt_n = math.sqrt(max(node.n, 1))
         parent_q = node.w[mover] / node.n if node.n else 1.0 / self.n_players
+        if self.normalize_q:
+            qs = [parent_q] + [c.w[mover] / c.n for c in node.children.values() if c.n]
+            lo, span = min(qs), max(qs) - min(qs)
         best, best_score = None, -1e9
         for x, p in node.prior.items():
             child = node.children.get(x)
@@ -176,6 +200,8 @@ class SearchAgent(Agent):
             else:
                 q = parent_q                      # first-play urgency: the parent's value
                 u = self.c_puct * p * sqrt_n
+            if self.normalize_q:
+                q = (q - lo) / span if span > 1e-9 else 0.5
             if q + u > best_score:
                 best, best_score = x, q + u
         return best

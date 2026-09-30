@@ -299,7 +299,8 @@ class HeuristicAgent(Agent):
 
 def make(name: str) -> Agent:
     """Agent by registry name: a style name, "randomized", "random",
-    "rl:<checkpoint.pt>", or "mcts:<simulations>:<checkpoint.pt>"."""
+    "rl:<checkpoint.pt>", or "mcts:<simulations>[+norm][+c<c_puct>]:<checkpoint.pt>[:<value.pt>]"
+    (norm: min-max normalised Q, see SearchAgent; e.g. "mcts:100+norm+c3:...")."""
     from .base import RandomAgent
     if name == "random":
         return RandomAgent()
@@ -308,6 +309,9 @@ def make(name: str) -> Agent:
         return RLAgent(name[3:])
     if name.startswith("mcts:"):
         from .search import SearchAgent
-        _, sims, path = name.split(":", 2)
-        return SearchAgent(path, sims=int(sims))
+        _, sims, path, *value = name.split(":")
+        sims, *opts = sims.split("+")
+        c_puct = [float(o[1:]) for o in opts if o.startswith("c")]
+        return SearchAgent(path, sims=int(sims), value_path=value[0] if value else "",
+                           normalize_q="norm" in opts, c_puct=c_puct[0] if c_puct else 1.5)
     return HeuristicAgent(name)

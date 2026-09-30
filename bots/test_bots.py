@@ -142,6 +142,39 @@ class SearchTests(unittest.TestCase):
             returns, _ = play_game(agents, rules, 3)   # play_game rejects illegal moves
             self.assertAlmostEqual(sum(returns), 1.0)
 
+    def test_separate_value_net_scores_leaves(self):
+        import tempfile
+        import torch
+        from bots.rl.features import FEATURE_VERSION
+        from bots.rl.model import PolicyValueNet, save
+        from bots.search import SearchAgent
+        rules = pgcore.Rules(players=4)
+        torch.manual_seed(0)
+        size, n = Encoder(rules).size, AbstractActions(rules).n
+        pnet, vnet = PolicyValueNet(size, n, 32), PolicyValueNet(size, n, 16)
+        pnet.feature_version = vnet.feature_version = FEATURE_VERSION
+        with tempfile.NamedTemporaryFile(suffix=".pt") as fp, \
+                tempfile.NamedTemporaryFile(suffix=".pt") as fv:
+            save(fp.name, pnet)
+            save(fv.name, vnet)
+            both = make(f"mcts:4:{fp.name}:{fv.name}")
+            plain = SearchAgent(fp.name, sims=4)
+            for a in (both, plain):
+                a.reset(rules, 0, random.Random(0))
+            state = pgcore.State(rules)
+            while state.is_chance_node():
+                state.apply_action(state.chance_outcomes()[0][0])
+            p1, _, v1 = both._evaluate(state)
+            p2, _, v2 = plain._evaluate(state)
+            for x in p1:                                  # priors from the policy net
+                self.assertAlmostEqual(p1[x], p2[x], places=5)
+            self.assertFalse(all(abs(a - b) < 1e-6 for a, b in zip(v1, v2)))   # values from the value net
+            norm = make(f"mcts:4+norm+c3:{fp.name}:{fv.name}")
+            self.assertTrue(norm.normalize_q and not both.normalize_q)
+            self.assertEqual((norm.c_puct, both.c_puct), (3.0, 1.5))
+            returns, _ = play_game([both, norm] + [make("balanced") for _ in range(2)], rules, 3)
+            self.assertAlmostEqual(sum(returns), 1.0)
+
 
 class ArenaTests(unittest.TestCase):
     def test_scripted_bots_play_legal_games_to_the_end(self):
