@@ -13,6 +13,7 @@ The player count is a parameter everywhere; the default is 4.
 | `rl/model.py` | Policy/value network, and `RLAgent`, which plays a checkpoint. |
 | `rating.py` | Elo-style ladder for multiplayer games (Plackett–Luce fit over mixed tables, bootstrap intervals, `random` = 0). Tracks strength among agents far above the scripted field. |
 | `search.py` | Decision-time tree search on top of a trained network (`mcts:<sims>:<checkpoint.pt>`): network policy as prior, value head for every seat, plant draws sampled. |
+| `rl/exit.py` | Expert iteration: self-play with search, train the network on the search's move choices and on game outcomes, gate each generation against the best so far. |
 | `select.py` | Picks the final bot from a run: a larger worst-case evaluation of `best.pt` and the hall of fame, plus mixed games among those candidates; writes `champion.pt`. |
 | `rl/train.py` | PPO against a league: self-play, every scripted style, and a hall of fame of the strongest earlier versions (ranked by worst case). Opponents it loses to are drawn more often. `best.pt` is the checkpoint with the best worst case. |
 
@@ -27,6 +28,9 @@ The player count is a parameter everywhere; the default is 4.
     # train (checkpoints, snapshots and log.jsonl go to --out)
     $PY -m bots.rl.train --out runs/league --iterations 1000
     $PY -m bots.rl.train --out runs/league2 --init runs/league/best.pt   # continue from a checkpoint
+
+    # expert iteration from a trained checkpoint
+    $PY -m bots.rl.exit --out runs/exit --init runs/league3/champion.pt
 
     # pick the final bot from a run (writes runs/league/champion.pt)
     $PY -m bots.select runs/league --games 400

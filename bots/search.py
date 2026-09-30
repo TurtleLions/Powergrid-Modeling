@@ -46,13 +46,18 @@ class Node:
 
 
 class SearchAgent(Agent):
-    def __init__(self, path: str, sims: int = 100, c_puct: float = 1.5,
-                 phases=SEARCH_PHASES, seed: int = 0):
+    def __init__(self, path: str = "", sims: int = 100, c_puct: float = 1.5,
+                 phases=SEARCH_PHASES, net=None, root_noise: float = 0.0,
+                 noise_alpha: float = 0.3):
+        """root_noise > 0 mixes Dirichlet(noise_alpha) noise into the root prior
+        (for exploration when generating training data; 0 for normal play)."""
         self.path = path
         self.sims = sims
         self.c_puct = c_puct
         self.phases = set(phases)
-        self.net = load(path)
+        self.net = net if net is not None else load(path)
+        self.root_noise = root_noise
+        self.noise_alpha = noise_alpha
         self.name = f"mcts{sims}"
 
     def reset(self, rules, seat, rng):
@@ -85,22 +90,37 @@ class SearchAgent(Agent):
         return amap[max(prior, key=prior.get)]
 
     # ---- search ---------------------------------------------------------
+    def wants_search(self, state) -> bool:
+        return (len(state.legal_actions()) > 1
+                and json.loads(state.to_json())["phase"] in self.phases)
+
+    def search(self, state):
+        """Run the search from `state`; returns (visit counts per abstract
+        action, abstract -> engine action map)."""
+        root = Node(state.clone())
+        self._expand(root)
+        if len(root.prior) > 1 and self.root_noise > 0:
+            keys = list(root.prior)
+            noise = np.random.default_rng(self.rng.randrange(1 << 30)).dirichlet(
+                [self.noise_alpha] * len(keys))
+            for k, eta in zip(keys, noise):
+                root.prior[k] = (1 - self.root_noise) * root.prior[k] + self.root_noise * eta
+        if len(root.prior) > 1:
+            for _ in range(self.sims):
+                self._simulate(root)
+        visits = {x: (root.children[x].n if x in root.children else 0) for x in root.prior}
+        if not any(visits.values()):
+            visits = {x: 1 if x == max(root.prior, key=root.prior.get) else 0 for x in root.prior}
+        return visits, root.amap
+
     def act(self, state) -> int:
         legal = state.legal_actions()
         if len(legal) == 1:
             return legal[0]
-        phase = json.loads(state.to_json())["phase"]
-        if phase not in self.phases:
+        if not self.wants_search(state):
             return self._greedy(state)
-        root = Node(state.clone())
-        self._expand(root)
-        if len(root.prior) == 1:
-            return root.amap[next(iter(root.prior))]
-        for _ in range(self.sims):
-            self._simulate(root)
-        best = max(root.children.items(), key=lambda kv: kv[1].n)[0] if root.children else \
-            max(root.prior, key=root.prior.get)
-        return root.amap[best]
+        visits, amap = self.search(state)
+        return amap[max(visits, key=visits.get)]
 
     def _expand(self, node: Node) -> np.ndarray:
         node.prior, node.amap, vals = self._evaluate(node.state)
