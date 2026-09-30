@@ -11,6 +11,8 @@ The player count is a parameter everywhere; the default is 4.
 | `evaluate.py` | Worst-case evaluation: one seat against N-1 copies of each opponent type, reporting the minimum across types. |
 | `rl/features.py` | Ego-centric state features padded to 6 seats, and the abstract action space (bids as raises). |
 | `rl/model.py` | Policy/value network, and `RLAgent`, which plays a checkpoint. |
+| `rating.py` | Elo-style ladder for multiplayer games (Plackett–Luce fit over mixed tables, bootstrap intervals, `random` = 0). Tracks strength among agents far above the scripted field. |
+| `search.py` | Decision-time tree search on top of a trained network (`mcts:<sims>:<checkpoint.pt>`): network policy as prior, value head for every seat, plant draws sampled. |
 | `select.py` | Picks the final bot from a run: a larger worst-case evaluation of `best.pt` and the hall of fame, plus mixed games among those candidates; writes `champion.pt`. |
 | `rl/train.py` | PPO against a league: self-play, every scripted style, and a hall of fame of the strongest earlier versions (ranked by worst case). Opponents it loses to are drawn more often. `best.pt` is the checkpoint with the best worst case. |
 
@@ -28,6 +30,9 @@ The player count is a parameter everywhere; the default is 4.
 
     # pick the final bot from a run (writes runs/league/champion.pt)
     $PY -m bots.select runs/league --games 400
+
+    # rate everything on one Elo scale (scripted styles are included by default)
+    $PY -m bots.rating --runs runs/league3 --games 10000
 
     # can the trained bot win against anyone? Worst case over opponent types
     $PY -m bots.evaluate rl:runs/league/champion.pt --games 400

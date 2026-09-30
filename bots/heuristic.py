@@ -298,12 +298,16 @@ class HeuristicAgent(Agent):
 
 
 def make(name: str) -> Agent:
-    """Agent by registry name: a style name, "randomized", "random", or
-    "rl:<checkpoint.pt>"."""
+    """Agent by registry name: a style name, "randomized", "random",
+    "rl:<checkpoint.pt>", or "mcts:<simulations>:<checkpoint.pt>"."""
     from .base import RandomAgent
     if name == "random":
         return RandomAgent()
     if name.startswith("rl:"):
         from .rl.model import RLAgent
         return RLAgent(name[3:])
+    if name.startswith("mcts:"):
+        from .search import SearchAgent
+        _, sims, path = name.split(":", 2)
+        return SearchAgent(path, sims=int(sims))
     return HeuristicAgent(name)

@@ -108,6 +108,41 @@ class FeatureVersionTests(unittest.TestCase):
         self.assertEqual([r > 0 for r in s.returns()], [k == best for k in key])
 
 
+class RatingTests(unittest.TestCase):
+    def test_fit_recovers_known_strengths(self):
+        import numpy as np
+        from bots.rating import ELO, fit
+        rng = random.Random(1)
+        agents = [f"a{i}" for i in range(8)] + ["random"]
+        true = np.array([rng.uniform(-1, 3) for _ in range(8)] + [0.0])
+        results = []
+        for _ in range(4000):
+            names = rng.sample(agents, 4)
+            p = np.exp(true[[agents.index(x) for x in names]])
+            w = rng.choices(range(4), p / p.sum())[0]
+            results.append((names, [1.0 if i == w else 0.0 for i in range(4)]))
+        err = np.abs(fit(results, agents) - true) * ELO
+        self.assertLess(err.mean(), 30)
+
+
+class SearchTests(unittest.TestCase):
+    def test_search_agent_plays_legal_games(self):
+        import tempfile
+        import torch
+        from bots.rl.features import FEATURE_VERSION
+        from bots.rl.model import PolicyValueNet, save
+        from bots.search import SearchAgent
+        rules = pgcore.Rules(players=4)
+        torch.manual_seed(0)
+        net = PolicyValueNet(Encoder(rules).size, AbstractActions(rules).n, 32)
+        net.feature_version = FEATURE_VERSION
+        with tempfile.NamedTemporaryFile(suffix=".pt") as f:
+            save(f.name, net)
+            agents = [SearchAgent(f.name, sims=4)] + [make("balanced") for _ in range(3)]
+            returns, _ = play_game(agents, rules, 3)   # play_game rejects illegal moves
+            self.assertAlmostEqual(sum(returns), 1.0)
+
+
 class ArenaTests(unittest.TestCase):
     def test_scripted_bots_play_legal_games_to_the_end(self):
         for players in (3, 4, 5):
