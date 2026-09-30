@@ -11,6 +11,7 @@ The player count is a parameter everywhere; the default is 4.
 | `evaluate.py` | Worst-case evaluation: one seat against N-1 copies of each opponent type, reporting the minimum across types. |
 | `rl/features.py` | Ego-centric state features padded to 6 seats, and the abstract action space (bids as raises). |
 | `rl/model.py` | Policy/value network, and `RLAgent`, which plays a checkpoint. |
+| `select.py` | Picks the final bot from a run: a larger worst-case evaluation of `best.pt` and the hall of fame, plus mixed games among those candidates; writes `champion.pt`. |
 | `rl/train.py` | PPO against a league: self-play, every scripted style, and a hall of fame of the strongest earlier versions (ranked by worst case). Opponents it loses to are drawn more often. `best.pt` is the checkpoint with the best worst case. |
 
 ## Usage
@@ -25,8 +26,11 @@ The player count is a parameter everywhere; the default is 4.
     $PY -m bots.rl.train --out runs/league --iterations 1000
     $PY -m bots.rl.train --out runs/league2 --init runs/league/best.pt   # continue from a checkpoint
 
+    # pick the final bot from a run (writes runs/league/champion.pt)
+    $PY -m bots.select runs/league --games 400
+
     # can the trained bot win against anyone? Worst case over opponent types
-    $PY -m bots.evaluate rl:runs/league/best.pt --games 200
+    $PY -m bots.evaluate rl:runs/league/champion.pt --games 400
 
 With 4 players, a win rate of 0.25 means the bot is only as good as the average player at the table.
 
