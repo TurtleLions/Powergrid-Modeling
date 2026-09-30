@@ -1,12 +1,19 @@
 """Expert iteration: search makes the network stronger, not just its play.
 
-    python3 -m bots.rl.exit --out runs/exit1 --init runs/league3/champion.pt
+    python3 -m bots.rl.exit --out runs/exit3 --init runs/league3/champion.pt \
+        --value-init runs/value1/big_aux05.pt
 
 Each generation:
 
  1. Play games in which the learner's seats use tree search (bots/search.py)
     with the BEST network so far (so a rejected generation cannot poison the
-    data), Dirichlet noise at the root for exploration.
+    data). With --value-init, leaves are scored by that separate value
+    network (fitted by bots/rl/value.py, held fixed here) and the policy
+    network is trained on policy targets only: per-decision value targets
+    from a few hundred games are what made exit2's value head memorise games.
+    --normalize-q with --c-puct 3 lets Q overrule a confident prior (see
+    bots/search.py); --root-noise (0 by default) adds Dirichlet noise, which
+    also leaks into the visit targets.
     The other seats come from the league (scripted styles and past
     checkpoints), or every seat is the learner (--p-selfplay).
  2. Train the network to imitate the search -- cross-entropy to the root
@@ -63,7 +70,10 @@ class Config:
     workers: int = max(1, (os.cpu_count() or 2) - 2)
     games_per_worker: int = 6
     sims: int = 100
-    root_noise: float = 0.15
+    value_init: str = ""          # separate, fixed value network for search
+    normalize_q: int = 1          # 1: min-max normalised Q in search
+    c_puct: float = 3.0
+    root_noise: float = 0.0
     sample_rounds: int = 3        # sample moves in proportion to visits up to this round
     learner_seats: int = 2        # searched seats per game (unless self-play)
     p_selfplay: float = 0.25      # games where every seat is the searching learner
@@ -83,7 +93,7 @@ class Config:
 # Self-play with search (worker processes)
 # ---------------------------------------------------------------------------
 def _play(job):
-    cfg, weights, meta, scripted, past, seed = job
+    cfg, weights, value_weights, meta, scripted, past, seed = job
     torch.set_num_threads(1)
     rng = random.Random(seed)
     np.random.seed(seed % (1 << 31))
@@ -94,7 +104,14 @@ def _play(job):
     net.feature_version = meta["feature_version"]
     net.eval()
     enc = Encoder(rules, net.feature_version)
-    searcher = SearchAgent(net=net, sims=cfg.sims, root_noise=cfg.root_noise)
+    vnet = None
+    if value_weights is not None:
+        vnet = PolicyValueNet(meta["obs_size"], meta["n_actions"], meta["value_hidden"])
+        vnet.load_state_dict(torch.load(io.BytesIO(value_weights), weights_only=False))
+        vnet.feature_version = meta["feature_version"]
+        vnet.eval()
+    searcher = SearchAgent(net=net, sims=cfg.sims, root_noise=cfg.root_noise, value_net=vnet,
+                           c_puct=cfg.c_puct, normalize_q=bool(cfg.normalize_q))
     searcher.reset(rules, 0, random.Random(rng.random()))
     pol_obs, pol_mask, pol_pi = [], [], []
     val_obs, val_z = [], []
@@ -197,9 +214,12 @@ def train(net, opt, buffer, cfg) -> dict:
         i = torch.randint(0, n_pol, (cfg.batch,))
         logits, _ = net(po[i], pm[i])
         pol_loss = -(pp[i] * F.log_softmax(logits, dim=-1)).sum(-1).mean()
-        j = torch.randint(0, n_val, (cfg.batch,))
-        _, value = net(vo[j], full)
-        val_loss = F.mse_loss(value, vz[j])
+        if cfg.value_init:                    # search uses the separate value network
+            val_loss = torch.zeros(())
+        else:
+            j = torch.randint(0, n_val, (cfg.batch,))
+            _, value = net(vo[j], full)
+            val_loss = F.mse_loss(value, vz[j])
         loss = pol_loss + cfg.value_coef * val_loss
         opt.zero_grad()
         loss.backward()
@@ -225,6 +245,14 @@ def main():
     net = load(cfg.init)
     meta = {"obs_size": net.body[0].in_features, "n_actions": net.policy.out_features,
             "hidden": net.body[0].out_features, "feature_version": net.feature_version}
+    value_weights = None
+    if cfg.value_init:
+        vnet = load(cfg.value_init)
+        assert vnet.feature_version == net.feature_version
+        meta["value_hidden"] = vnet.body[0].out_features
+        vbuf = io.BytesIO()
+        torch.save(vnet.state_dict(), vbuf)
+        value_weights = vbuf.getvalue()
     opt = torch.optim.Adam(net.parameters(), lr=cfg.lr)
     best = os.path.join(cfg.out, "best.pt")
     shutil.copyfile(cfg.init, best)
@@ -238,7 +266,7 @@ def main():
             t0 = time.time()
             buf = io.BytesIO()
             torch.save(load(best).state_dict(), buf)      # data from the best network
-            jobs = [(cfg, buf.getvalue(), meta, scripted, past, rng.randrange(1 << 30))
+            jobs = [(cfg, buf.getvalue(), value_weights, meta, scripted, past, rng.randrange(1 << 30))
                     for _ in range(cfg.workers)]
             parts, results = [], []
             for data, res in pool.imap_unordered(_play, jobs):
