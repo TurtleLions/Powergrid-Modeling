@@ -6,8 +6,9 @@ Monte Carlo tree search in the AlphaZero style, adapted to 2-6 players and
 chance: the network's policy is the prior over moves (PUCT), and leaves are
 scored by the value head from every seat's point of view, giving a vector of
 expected win shares. Each player in the tree picks the move best for itself
-(max^n); plant draws are sampled from their true probabilities as the search
-passes through chance nodes. The engine's cheap state copy (under a
+(max^n). Plant draws are chance nodes: every visit samples an outcome from
+the true probabilities, and each outcome gets its own subtree, so the search
+does not plan as if one sampled draw were certain. The engine's cheap state copy (under a
 microsecond) makes this affordable.
 
 Search runs only where decisions matter most (auctions, building, choosing
@@ -114,6 +115,18 @@ class SearchAgent(Agent):
             if s.is_terminal():
                 vals = np.asarray(s.returns(), dtype=np.float64)
                 break
+            if s.is_chance_node():
+                outs = s.chance_outcomes()
+                o = self.rng.choices([a for a, _ in outs], [p for _, p in outs])[0]
+                child = node.children.get(o)
+                if child is None:
+                    nxt = s.clone()
+                    nxt.apply_action(o)
+                    child = Node(nxt)
+                    node.children[o] = child
+                path.append(child)
+                node = child
+                continue
             if not node.expanded:
                 vals = self._expand(node)
                 break
@@ -122,7 +135,6 @@ class SearchAgent(Agent):
             if child is None:
                 nxt = s.clone()
                 nxt.apply_action(node.amap[x])
-                self._resolve_chance(nxt)
                 child = Node(nxt)
                 node.children[x] = child
             path.append(child)
@@ -130,12 +142,6 @@ class SearchAgent(Agent):
         for nd in path:
             nd.n += 1
             nd.w = vals.copy() if nd.w is None else nd.w + vals
-
-    def _resolve_chance(self, state):
-        """Sample plant draws (and any other chance) from their true distribution."""
-        while state.is_chance_node():
-            outs = state.chance_outcomes()
-            state.apply_action(self.rng.choices([o for o, _ in outs], [p for _, p in outs])[0])
 
     def _select(self, node: Node) -> int:
         mover = node.mover
