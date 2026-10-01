@@ -91,18 +91,26 @@ def prep(a):
     obs.flush()
     for k in ("win", "margin", "game", "round"):
         np.save(f"{a.dir}/{k}.npy", np.concatenate([npz_member(p, k, n) for p, n in zip(files, sizes)]))
-    json.dump({"sources": files, "rows": sizes}, open(f"{a.dir}/prep.json", "w"))
+    np.save(f"{a.dir}/source.npy", np.concatenate([np.full(n, i, np.int8) for i, n in enumerate(sizes)]))
+    groups = [g.split(",") for g in a.split_groups.split(";")] if a.split_groups else [files]
+    assert sorted(sum(groups, [])) == sorted(files), "--split-groups must partition --sources"
+    json.dump({"sources": files, "rows": sizes, "split_groups": groups}, open(f"{a.dir}/prep.json", "w"))
     game = np.load(f"{a.dir}/game.npy")
     assert (game.reshape(-1, N_SEATS) == game.reshape(-1, N_SEATS)[:, :1]).all()
     print("rows", i, "games", len(np.unique(game)), flush=True)
 
 
 def split(d):
-    """(training positions, held-out positions): 5% of all source games, seed 0."""
-    files = json.load(open(f"{d}/prep.json"))["sources"]
-    allg = np.unique(np.concatenate([npz_member(p, "game") for p in files]))
-    held = np.random.default_rng(0).choice(allg, int(len(allg) * 0.05), replace=False)
-    pos_te = np.isin(np.load(f"{d}/game.npy"), held)[::N_SEATS]
+    """(training positions, held-out positions): 5% of the games of each split
+    group (seed 0). One group of runs/value1/data.npz + data2.npz gives the
+    held-out games of runs/value1/big_aux05.pt, so adding sources as a new
+    group keeps earlier models' held-out games unseen."""
+    info = json.load(open(f"{d}/prep.json"))
+    held = []
+    for group in info.get("split_groups", [info["sources"]]):
+        allg = np.unique(np.concatenate([npz_member(p, "game") for p in group]))
+        held.append(np.random.default_rng(0).choice(allg, int(len(allg) * 0.05), replace=False))
+    pos_te = np.isin(np.load(f"{d}/game.npy"), np.concatenate(held))[::N_SEATS]
     return np.flatnonzero(~pos_te), np.flatnonzero(pos_te)
 
 
@@ -169,6 +177,11 @@ def train(a):
         other = tr[pgame[tr] % 2 == a.fold]
         tr = tr[pgame[tr] % 2 != a.fold]
     target = np.load(f"{a.dir}/{a.target}") if a.target else None
+    if a.oversample > 1:                              # repeat positions from later sources
+        src = np.load(f"{a.dir}/source.npy")[::N_SEATS]
+        extra = tr[src[tr] >= a.oversample_from]
+        tr = np.concatenate([tr] + [extra] * (a.oversample - 1))
+        print("oversampled", len(extra), "positions x", a.oversample, flush=True)
     sets = eval_sets(a)
     m = SeatValueNet(obs.shape[1], a.arch, a.hidden, a.depth, a.layers, a.loss)
     opt = torch.optim.AdamW(m.parameters(), lr=a.lr, weight_decay=1e-4)
@@ -270,6 +283,8 @@ def main():
     ap.add_argument("--dir", default="runs/value2")
     ap.add_argument("--sources", default="runs/value1/data.npz,runs/value1/data2.npz")
     ap.add_argument("--max-rows", type=int, default=0, help="prep: cap the rows (RAM)")
+    ap.add_argument("--split-groups", default="",
+                    help="prep: ';'-separated groups of sources, 5%% of each group's games held out")
     ap.add_argument("--search-eval", default="runs/varch/search_eval.npz",
                     help="positions from searched games (value.py gen --agents mcts:...)")
     ap.add_argument("--name", default="value")
@@ -288,6 +303,9 @@ def main():
     ap.add_argument("--target", default="")
     ap.add_argument("--lam", type=float, default=0.5)
     ap.add_argument("--ckpts", default="")
+    ap.add_argument("--oversample", type=int, default=1,
+                    help="train: repeat positions of sources >= --oversample-from this many times")
+    ap.add_argument("--oversample-from", type=int, default=2)
     a = ap.parse_args(sys.argv[2:])
     {"prep": prep, "train": train, "targets": targets, "eval": evaluate}[cmd](a)
 
