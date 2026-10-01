@@ -30,6 +30,7 @@ import torch
 from .base import Agent
 from .rl.features import AbstractActions, Encoder
 from .rl.model import load
+from .rl.value_models import LegacyValue, load_value
 
 SEARCH_PHASES = ("AUCTION_SELECT", "AUCTION_BID", "AUCTION_DISCARD", "BUILD")
 
@@ -55,8 +56,9 @@ class SearchAgent(Agent):
                  normalize_q: bool = False):
         """root_noise > 0 mixes Dirichlet(noise_alpha) noise into the root prior
         (for exploration when generating training data; 0 for normal play).
-        value_path / value_net: score leaves with this network's value head
-        instead of the policy network's (same feature version).
+        value_path / value_net: score leaves with this value network instead
+        of the policy network's value head: a PolicyValueNet, or a seat
+        value model (bots/rl/value_models.py) that scores all seats jointly.
         normalize_q: rescale the mover's Q values at each node to [0, 1] over
         its children (min-max, as in MuZero). Win shares differ by a few
         hundredths between moves, far less than the exploration term, so
@@ -67,9 +69,9 @@ class SearchAgent(Agent):
         self.phases = set(phases)
         self.net = net if net is not None else load(path)
         self.normalize_q = normalize_q
-        self.value_net = value_net if value_net is not None else (load(value_path) if value_path else None)
-        if self.value_net is not None:
-            assert getattr(self.value_net, "feature_version", 1) == getattr(self.net, "feature_version", 1)
+        if value_net is not None and isinstance(value_net, torch.nn.Module):
+            value_net = LegacyValue(value_net)
+        self.value_net = value_net if value_net is not None else (load_value(value_path) if value_path else None)
         self.root_noise = root_noise
         self.noise_alpha = noise_alpha
         self.name = f"mcts{sims}"
@@ -78,6 +80,8 @@ class SearchAgent(Agent):
         super().reset(rules, seat, rng)
         self.n_players = rules.num_players
         self.enc = Encoder(rules, getattr(self.net, "feature_version", 1))
+        if self.value_net is not None:
+            assert self.value_net.obs_size == self.enc.size, "value network expects other features"
         self.actions = AbstractActions(rules)
         torch.set_num_threads(1)
 
@@ -100,10 +104,12 @@ class SearchAgent(Agent):
         else:
             logits, _ = self.net(x[mover:mover + 1], torch.from_numpy(mask)[None])
             logits = logits[0]
-            values = self.value_net.value(self.value_net.body(x)).squeeze(-1)
         prior = torch.softmax(logits, dim=0).numpy()
-        vals = np.clip(values.numpy().astype(np.float64), 1e-3, None)
-        vals /= vals.sum()
+        if self.value_net is None:
+            vals = np.clip(values.numpy().astype(np.float64), 1e-3, None)
+            vals /= vals.sum()
+        else:
+            vals = self.value_net(x)                  # win shares, summing to 1
         return {x: float(prior[x]) for x in amap}, amap, vals
 
     def _greedy(self, state) -> int:

@@ -35,7 +35,8 @@ Each generation:
  4. Every --value-every generations the value network is refreshed: fast
     raw-network games with the best policy (bots/rl/value.py gen) plus
     --value-replay, fine-tuned from the current value network; kept only if
-    its held-out error beats the current one's.
+    its held-out error beats the current one's. (Only for PolicyValueNet
+    value networks; seat value models from bots/rl/value_td.py stay fixed.)
 
 A --policy-holdout share of each generation's games is never trained on: the
 log reports the fit on their searched decisions (cross-entropy, KL to the
@@ -71,6 +72,7 @@ from ..heuristic import make  # noqa: E402
 from ..search import SearchAgent  # noqa: E402
 from .features import AbstractActions, Encoder  # noqa: E402
 from .model import PolicyValueNet, RLAgent, load, save  # noqa: E402
+from .value_models import LegacyValue, load_value  # noqa: E402
 
 LEARNER = "learner"
 
@@ -117,7 +119,7 @@ class Config:
 # Self-play with search (worker processes)
 # ---------------------------------------------------------------------------
 def _play(job):
-    cfg, weights, value_weights, meta, scripted, past, seed = job
+    cfg, weights, value_path, meta, scripted, past, seed = job
     torch.set_num_threads(1)
     rng = random.Random(seed)
     np.random.seed(seed % (1 << 31))
@@ -128,12 +130,7 @@ def _play(job):
     net.feature_version = meta["feature_version"]
     net.eval()
     enc = Encoder(rules, net.feature_version)
-    vnet = None
-    if value_weights is not None:
-        vnet = PolicyValueNet(meta["obs_size"], meta["n_actions"], meta["value_hidden"])
-        vnet.load_state_dict(torch.load(io.BytesIO(value_weights), weights_only=False))
-        vnet.feature_version = meta["feature_version"]
-        vnet.eval()
+    vnet = load_value(value_path) if value_path else None
     searcher = SearchAgent(net=net, sims=cfg.sims, root_noise=cfg.root_noise, value_net=vnet,
                            c_puct=cfg.c_puct, normalize_q=bool(cfg.normalize_q))
     searcher.reset(rules, 0, random.Random(rng.random()))
@@ -312,17 +309,9 @@ def main():
     net = load(cfg.init)
     meta = {"obs_size": net.body[0].in_features, "n_actions": net.policy.out_features,
             "hidden": net.body[0].out_features, "feature_version": net.feature_version}
-    def value_bytes(path):
-        if not path:
-            return None
-        vnet = load(path)
-        assert vnet.feature_version == net.feature_version
-        meta["value_hidden"] = vnet.body[0].out_features
-        vbuf = io.BytesIO()
-        torch.save(vnet.state_dict(), vbuf)
-        return vbuf.getvalue()
     value_path = cfg.value_init
-    value_weights = value_bytes(value_path)
+    if value_path:
+        assert load_value(value_path).obs_size == meta["obs_size"]
     opt = torch.optim.Adam(net.parameters(), lr=cfg.lr)
     best = os.path.join(cfg.out, "best.pt")
     shutil.copyfile(cfg.init, best)
@@ -336,7 +325,7 @@ def main():
             t0 = time.time()
             buf = io.BytesIO()
             torch.save(load(best).state_dict(), buf)      # data from the best network
-            jobs = [(cfg, buf.getvalue(), value_weights, meta, scripted, past, rng.randrange(1 << 30))
+            jobs = [(cfg, buf.getvalue(), value_path, meta, scripted, past, rng.randrange(1 << 30))
                     for _ in range(cfg.workers)]
             parts, results = [], []
             for data, res in pool.imap_unordered(_play, jobs):
@@ -370,13 +359,13 @@ def main():
                 opt = torch.optim.Adam(net.parameters(), lr=cfg.lr)
             t_gate = time.time() - t0 - t_play - t_train
             value_rec = {}
-            if cfg.value_every and value_path and gen % cfg.value_every == 0:
+            if cfg.value_every and value_path and gen % cfg.value_every == 0 \
+                    and isinstance(load_value(value_path), LegacyValue):   # value.fit's kind only
                 new_path, summary = refresh_value(cfg, gen, best, past, value_path)
                 value_rec = {"value_refresh": {"kept": new_path != value_path,
                                                "base_mse": summary["base"]["mse"],
                                                "best_mse": (summary["best"] or {}).get("mse")}}
                 value_path = new_path
-                value_weights = value_bytes(value_path)
             vs_league = [r["learner"] for r in results if not r["selfplay"]]
             rec = {"gen": gen, "games": len(results), "play_s": round(t_play),
                    "train_s": round(t_train), "gate_s": round(t_gate), **stats, **held_fit,

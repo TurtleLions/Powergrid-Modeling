@@ -176,6 +176,39 @@ class SearchTests(unittest.TestCase):
             self.assertAlmostEqual(sum(returns), 1.0)
 
 
+    def test_seat_value_model_in_search(self):
+        import tempfile
+        import torch
+        from bots.rl.features import FEATURE_VERSION
+        from bots.rl.model import PolicyValueNet, save
+        from bots.rl.value_models import SeatValueNet, load_value, save_value
+        rules = pgcore.Rules(players=4)
+        torch.manual_seed(0)
+        size, n = Encoder(rules).size, AbstractActions(rules).n
+        pnet = PolicyValueNet(size, n, 32)
+        pnet.feature_version = FEATURE_VERSION
+        for arch in ("mlp", "attn"):
+            vm = SeatValueNet(size, arch=arch, hidden=16, depth=1, layers=1, loss="joint")
+            with tempfile.NamedTemporaryFile(suffix=".pt") as fp, \
+                    tempfile.NamedTemporaryFile(suffix=".pt") as fv:
+                save(fp.name, pnet)
+                save_value(fv.name, vm)
+                agent = make(f"mcts:4+norm+c3:{fp.name}:{fv.name}")
+                agent.reset(rules, 0, random.Random(0))
+                state = pgcore.State(rules)
+                while state.is_chance_node():
+                    state.apply_action(state.chance_outcomes()[0][0])
+                _, _, vals = agent._evaluate(state)
+                self.assertEqual(len(vals), 4)
+                self.assertAlmostEqual(float(sum(vals)), 1.0, places=5)
+                obs = torch.stack([torch.from_numpy(agent.enc.encode(state, p)) for p in range(4)])
+                want = torch.softmax(vm(obs[None])[0][0], -1).detach().numpy()
+                self.assertTrue(all(abs(a - b) < 1e-5 for a, b in zip(vals, want)))
+                self.assertEqual(load_value(fv.name).obs_size, size)
+                returns, _ = play_game([agent] + [make("balanced") for _ in range(3)], rules, 3)
+                self.assertAlmostEqual(sum(returns), 1.0)
+
+
 class ArenaTests(unittest.TestCase):
     def test_scripted_bots_play_legal_games_to_the_end(self):
         for players in (3, 4, 5):
