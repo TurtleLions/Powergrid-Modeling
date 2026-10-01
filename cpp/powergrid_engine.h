@@ -213,6 +213,11 @@ class State {
   static int ObservationSize(const Rules& rules);
   void ObservationTensor(int viewer, float* out) const;  // writes ObservationSize floats
 
+  // The learning agents' features (bots/rl/features.py, version 2), identical
+  // to the Python encoder: ego-centric for `seat`, padded to kMaxPlayers.
+  static int FeatureSize(const Rules& rules);
+  void Features(int seat, float* out) const;  // writes FeatureSize floats
+
   const std::vector<Event>& log() const { return log_; }
   int round() const { return d_.round; }
   int step() const { return d_.step; }

@@ -36,7 +36,7 @@ SEARCH_PHASES = ("AUCTION_SELECT", "AUCTION_BID", "AUCTION_DISCARD", "BUILD")
 
 
 class Node:
-    __slots__ = ("state", "mover", "prior", "amap", "children", "n", "w", "expanded")
+    __slots__ = ("state", "mover", "prior", "amap", "children", "n", "w", "expanded", "value")
 
     def __init__(self, state):
         self.state = state
@@ -47,13 +47,14 @@ class Node:
         self.n = 0
         self.w: Optional[np.ndarray] = None
         self.expanded = False
+        self.value: Optional[np.ndarray] = None   # network value at expansion (batched search)
 
 
 class SearchAgent(Agent):
     def __init__(self, path: str = "", sims: int = 100, c_puct: float = 1.5,
                  phases=SEARCH_PHASES, net=None, root_noise: float = 0.0,
                  noise_alpha: float = 0.3, value_path: str = "", value_net=None,
-                 normalize_q: bool = False):
+                 normalize_q: bool = False, batch: int = 1):
         """root_noise > 0 mixes Dirichlet(noise_alpha) noise into the root prior
         (for exploration when generating training data; 0 for normal play).
         value_path / value_net: score leaves with this value network instead
@@ -62,7 +63,14 @@ class SearchAgent(Agent):
         normalize_q: rescale the mover's Q values at each node to [0, 1] over
         its children (min-max, as in MuZero). Win shares differ by a few
         hundredths between moves, far less than the exploration term, so
-        without this a confident prior is almost never overruled."""
+        without this a confident prior is almost never overruled.
+        batch > 1: each round walks `batch` paths down the tree, each node on
+        a path counting a provisional visit (virtual loss: value 0) so the
+        next path goes elsewhere, then scores all new leaves in one network
+        call. Reading the weights dominates the cost of a network call, so
+        this is several times cheaper per leaf; it explores a little
+        differently, so judge it by strength at equal time. batch = 1 is the
+        plain sequential search."""
         self.path = path
         self.sims = sims
         self.c_puct = c_puct
@@ -74,6 +82,7 @@ class SearchAgent(Agent):
         self.value_net = value_net if value_net is not None else (load_value(value_path) if value_path else None)
         self.root_noise = root_noise
         self.noise_alpha = noise_alpha
+        self.batch = max(1, batch)
         self.name = f"mcts{sims}"
 
     def reset(self, rules, seat, rng):
@@ -86,13 +95,20 @@ class SearchAgent(Agent):
         torch.set_num_threads(1)
 
     # ---- network --------------------------------------------------------
+    def _features(self, state) -> np.ndarray:
+        """Every seat's features [players, size]: the engine's C++ encoder
+        (identical values) when this pgcore has it and the version matches."""
+        if self.enc.version == 2 and hasattr(state, "features_all"):
+            return state.features_all()
+        v = json.loads(state.to_json())
+        return np.stack([self.enc._encode(state, v, p) for p in range(self.n_players)])
+
     @torch.no_grad()
     def _evaluate(self, state):
         """Prior over the mover's abstract actions, and a value vector (one
         expected win share per seat, normalised to sum to 1)."""
-        v = json.loads(state.to_json())
         n = self.n_players
-        obs = np.stack([self.enc._encode(state, v, p) for p in range(n)])
+        obs = self._features(state)
         mask, amap = self.actions.mask_and_map(state.legal_actions())
         masks = np.ones((n, self.actions.n), dtype=np.bool_)
         mover = state.current_player()
@@ -133,8 +149,13 @@ class SearchAgent(Agent):
             for k, eta in zip(keys, noise):
                 root.prior[k] = (1 - self.root_noise) * root.prior[k] + self.root_noise * eta
         if len(root.prior) > 1:
-            for _ in range(self.sims):
-                self._simulate(root)
+            if self.batch == 1:
+                for _ in range(self.sims):
+                    self._simulate(root)
+            else:
+                done = 0
+                while done < self.sims:
+                    done += self._simulate_batch(root, min(self.batch, self.sims - done))
         visits = {x: (root.children[x].n if x in root.children else 0) for x in root.prior}
         if not any(visits.values()):
             visits = {x: 1 if x == max(root.prior, key=root.prior.get) else 0 for x in root.prior}
@@ -189,6 +210,87 @@ class SearchAgent(Agent):
         for nd in path:
             nd.n += 1
             nd.w = vals.copy() if nd.w is None else nd.w + vals
+
+    @torch.no_grad()
+    def _evaluate_batch(self, states):
+        """_evaluate for several states in one network call per network."""
+        n = self.n_players
+        obs = np.stack([self._features(s) for s in states])            # [L, n, F]
+        movers = [s.current_player() for s in states]
+        maps = [self.actions.mask_and_map(s.legal_actions()) for s in states]
+        masks = np.stack([m for m, _ in maps])
+        x = torch.from_numpy(obs)
+        rows = x[torch.arange(len(states)), torch.tensor(movers)]      # the movers' views
+        logits, own_values = self.net(rows, torch.from_numpy(masks))
+        priors = torch.softmax(logits, dim=-1).numpy()
+        if self.value_net is not None:
+            vals = self.value_net.batch(x)
+        else:
+            full = torch.ones(len(states) * n, self.actions.n, dtype=torch.bool)
+            _, v = self.net(x.reshape(len(states) * n, -1), full)
+            vals = np.clip(v.numpy().astype(np.float64).reshape(len(states), n), 1e-3, None)
+            vals /= vals.sum(-1, keepdims=True)
+        return [({a: float(priors[i][a]) for a in amap}, amap, vals[i])
+                for i, (_, amap) in enumerate(maps)]
+
+    def _descend(self, root: Node):
+        """One path from the root to a leaf, counting a provisional visit on
+        every node of it. Returns (path, value or None if the leaf needs the
+        network)."""
+        path, node = [root], root
+        while True:
+            s = node.state
+            if s.is_terminal():
+                vals = np.asarray(s.returns(), dtype=np.float64)
+                break
+            if s.is_chance_node():
+                outs = s.chance_outcomes()
+                o = self.rng.choices([a for a, _ in outs], [p for _, p in outs])[0]
+                child = node.children.get(o)
+                if child is None:
+                    nxt = s.clone()
+                    nxt.apply_action(o)
+                    child = node.children[o] = Node(nxt)
+                path.append(child)
+                node = child
+                continue
+            if not node.expanded:
+                vals = None
+                break
+            x = self._select(node)
+            child = node.children.get(x)
+            if child is None:
+                nxt = s.clone()
+                nxt.apply_action(node.amap[x])
+                child = node.children[x] = Node(nxt)
+            path.append(child)
+            node = child
+        for nd in path:                       # virtual loss: a visit worth 0 to everyone
+            nd.n += 1
+            if nd.w is None:
+                nd.w = np.zeros(self.n_players)
+        return path, vals
+
+    def _simulate_batch(self, root: Node, k: int) -> int:
+        """k simulations whose new leaves are scored in one network call."""
+        pending = []                          # (path, leaf) awaiting the network
+        for _ in range(k):
+            path, vals = self._descend(root)
+            if vals is None:
+                pending.append(path)
+            else:
+                for nd in path:
+                    nd.w += vals
+        leaves = list({id(p[-1]): p[-1] for p in pending}.values())
+        if leaves:
+            for leaf, (prior, amap, vals) in zip(leaves, self._evaluate_batch([l.state for l in leaves])):
+                leaf.prior, leaf.amap, leaf.expanded = prior, amap, True
+                leaf.value = vals
+        for path in pending:
+            vals = path[-1].value
+            for nd in path:
+                nd.w += vals
+        return k
 
     def _select(self, node: Node) -> int:
         mover = node.mover

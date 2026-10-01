@@ -209,6 +209,66 @@ class SearchTests(unittest.TestCase):
                 self.assertAlmostEqual(sum(returns), 1.0)
 
 
+class FastPathTests(unittest.TestCase):
+    def test_cpp_features_match_python_encoder(self):
+        import json
+        import numpy as np
+        if not hasattr(pgcore.State, "features"):
+            self.skipTest("pgcore built without features(); run make -C cpp pgcore")
+        for players in (2, 4, 6):
+            rules = pgcore.Rules(players=players)
+            enc = Encoder(rules, 2)
+            self.assertEqual(rules.feature_size, enc.size)
+            rng = random.Random(players)
+            agents = [make(list(STYLES)[i % len(STYLES)]) for i in range(players)]
+            for seat, a in enumerate(agents):
+                a.reset(rules, seat, random.Random(seat))
+            state = pgcore.State(rules)
+            while not state.is_terminal():
+                if state.is_chance_node():
+                    outs = state.chance_outcomes()
+                    state.apply_action(rng.choices([o for o, _ in outs], [p for _, p in outs])[0])
+                    continue
+                v = json.loads(state.to_json())
+                allf = state.features_all()
+                for seat in range(players):
+                    want = enc._encode(state, v, seat)
+                    self.assertTrue(np.array_equal(state.features(seat), want), v["phase"])
+                    self.assertTrue(np.array_equal(allf[seat], want))
+                state.apply_action(agents[state.current_player()].act(state))
+
+    def test_batched_search_plays_legal_games(self):
+        import tempfile
+        import torch
+        from bots.rl.features import FEATURE_VERSION
+        from bots.rl.model import PolicyValueNet, save
+        from bots.rl.value_models import SeatValueNet, save_value
+        rules = pgcore.Rules(players=4)
+        torch.manual_seed(0)
+        size, n = Encoder(rules).size, AbstractActions(rules).n
+        pnet = PolicyValueNet(size, n, 32)
+        pnet.feature_version = FEATURE_VERSION
+        with tempfile.NamedTemporaryFile(suffix=".pt") as fp, \
+                tempfile.NamedTemporaryFile(suffix=".pt") as fv:
+            save(fp.name, pnet)
+            save_value(fv.name, SeatValueNet(size, hidden=16, depth=1))
+            for name in (f"mcts:12+norm+c3+b4:{fp.name}:{fv.name}", f"mcts:12+b4:{fp.name}"):
+                agent = make(name)
+                self.assertEqual(agent.batch, 4)
+                agent.reset(rules, 0, random.Random(0))
+                state = pgcore.State(rules)
+                while not (not state.is_chance_node() and agent.wants_search(state)):
+                    if state.is_chance_node():
+                        state.apply_action(state.chance_outcomes()[0][0])
+                    else:
+                        state.apply_action(state.legal_actions()[0])
+                visits, amap = agent.search(state)
+                self.assertEqual(sum(visits.values()), 12)  # every simulation reaches the root
+                self.assertTrue(set(amap.values()) <= set(state.legal_actions()))
+                returns, _ = play_game([agent] + [make("balanced") for _ in range(3)], rules, 3)
+                self.assertAlmostEqual(sum(returns), 1.0)
+
+
 class ArenaTests(unittest.TestCase):
     def test_scripted_bots_play_legal_games_to_the_end(self):
         for players in (3, 4, 5):

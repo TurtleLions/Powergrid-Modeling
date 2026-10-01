@@ -69,6 +69,11 @@ class SeatValue:
     def __call__(self, x: torch.Tensor) -> np.ndarray:
         return self.model.win_prob(x[None])[0].numpy().astype(np.float64)
 
+    @torch.no_grad()
+    def batch(self, x: torch.Tensor) -> np.ndarray:
+        """x [positions, seats, obs] -> win shares [positions, seats]."""
+        return self.model.win_prob(x).numpy().astype(np.float64)
+
 
 class LegacyValue:
     def __init__(self, net):
@@ -81,6 +86,12 @@ class LegacyValue:
         v = self.net.value(self.net.body(x)).squeeze(-1).numpy().astype(np.float64)
         v = np.clip(v, 1e-3, None)
         return v / v.sum()
+
+    @torch.no_grad()
+    def batch(self, x: torch.Tensor) -> np.ndarray:
+        v = self.net.value(self.net.body(x)).squeeze(-1).numpy().astype(np.float64)
+        v = np.clip(v, 1e-3, None)
+        return v / v.sum(-1, keepdims=True)
 
 
 def load_value(path: str):

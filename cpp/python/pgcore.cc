@@ -76,6 +76,7 @@ PYBIND11_MODULE(pgcore, m) {
       .def_property_readonly("num_actions", [](const Rules& r) {
         return powergrid::Codec(r).num_actions;
       })
+      .def_property_readonly("feature_size", [](const Rules& r) { return State::FeatureSize(r); })
       .def_property_readonly("observation_size",
                              [](const Rules& r) { return State::ObservationSize(r); })
       .def_property_readonly("codec", [](const Rules& r) {
@@ -126,6 +127,21 @@ PYBIND11_MODULE(pgcore, m) {
              s.ObservationTensor(viewer, out.mutable_data());
              return out;
            })
+      .def("features",
+           [](const State& s, int seat) {
+             py::array_t<float> out(State::FeatureSize(s.rules()));
+             s.Features(seat, out.mutable_data());
+             return out;
+           },
+           "bots/rl/features.py (version 2) features for seat, computed in C++")
+      .def("features_all",
+           [](const State& s) {
+             const int n = s.num_players(), k = State::FeatureSize(s.rules());
+             py::array_t<float> out({n, k});
+             for (int p = 0; p < n; ++p) s.Features(p, out.mutable_data() + p * k);
+             return out;
+           },
+           "features for every seat, shape [players, size]")
       .def("log", [](const State& s) {
         std::vector<std::string> out;
         for (const auto& e : s.log()) out.push_back(e.ToString());

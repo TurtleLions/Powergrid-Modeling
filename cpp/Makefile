@@ -11,9 +11,9 @@ PGCORE := $(BIN)/pgcore$(shell $(PYTHON) -c "import sysconfig; print(sysconfig.g
 
 pgcore: $(PGCORE)
 
-$(PGCORE): python/pgcore.cc powergrid_engine.cc powergrid_engine.h powergrid_data.inc | $(BIN)
+$(PGCORE): python/pgcore.cc powergrid_engine.cc powergrid_features.cc powergrid_engine.h powergrid_data.inc | $(BIN)
 	$(CXX) -std=c++17 -O3 -g -Wall -Wextra -shared -fPIC \
-	  $(shell $(PYTHON) -m pybind11 --includes) -o $@ python/pgcore.cc powergrid_engine.cc
+	  $(shell $(PYTHON) -m pybind11 --includes) -o $@ python/pgcore.cc powergrid_engine.cc powergrid_features.cc
 
 $(BIN)/%: %.cc powergrid_engine.cc powergrid_engine.h powergrid_data.inc | $(BIN)
 	$(CXX) $(CXXFLAGS) -o $@ $< powergrid_engine.cc
