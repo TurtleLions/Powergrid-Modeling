@@ -63,6 +63,8 @@ class GenConfig:
     p_all_rl: float = 0.5         # every seat a checkpoint (else rl and scripted mixed)
     p_sampled: float = 0.25       # an rl seat samples from its policy instead of argmax
     checkpoints: str = ",".join(CHECKPOINTS)
+    agents: str = ""              # instead: every seat drawn from these make() names
+                                  # (e.g. mcts:..., for positions from searched games)
     workers: int = max(1, (os.cpu_count() or 2) - 2)
     seed: int = 0
 
@@ -72,7 +74,7 @@ def _gen(job):
     torch.set_num_threads(1)
     rules = pgcore.Rules(players=cfg.players, map=cfg.map)
     enc = Encoder(rules, 2)
-    nets = {p: load(p) for p in cfg.checkpoints.split(",")}
+    nets = {} if cfg.agents else {p: load(p) for p in cfg.checkpoints.split(",")}
     scripted = list(STYLES) + [RANDOMIZED]
     n = cfg.players
     obs, win, margin, game, rnd = [], [], [], [], []
@@ -81,7 +83,9 @@ def _gen(job):
         agents = []
         all_rl = rng.random() < cfg.p_all_rl
         for seat in range(n):
-            if all_rl or rng.random() < 0.5:
+            if cfg.agents:
+                agents.append(make(rng.choice(cfg.agents.split(","))))
+            elif all_rl or rng.random() < 0.5:
                 p = rng.choice(list(nets))
                 agents.append(RLAgent(p, greedy=rng.random() >= cfg.p_sampled, net=nets[p]))
             else:

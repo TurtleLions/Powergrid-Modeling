@@ -2,6 +2,7 @@
 
     python3 -m bots.rating --agents balanced,builder,rl:runs/league3/champion.pt,... --games 6000
     python3 -m bots.rating --runs runs/league3 --games 6000     # every checkpoint of a run
+    python3 -m bots.rating --agents ... --games-log runs/x/games.jsonl   # resumable
 
 Model (Plackett-Luce, top-1): each agent has a strength s; at a table T the
 chance that agent i wins is exp(s_i) / sum_{j in T} exp(s_j). Shared wins count
@@ -34,9 +35,18 @@ from .heuristic import RANDOMIZED, STYLES, make
 ELO = 400.0 / math.log(10.0)
 
 
+def _indexed(item):
+    i, job = item
+    return i, _worker(job)
+
+
 def play(agents: Sequence[str], players: int, games: int, seed: int, procs: int = None,
-         start: str = "spawn") -> List[tuple]:
-    """Mixed games of distinct agents; returns [(names, returns)]."""
+         start: str = "spawn", log: str = "") -> List[tuple]:
+    """Mixed games of distinct agents; returns [(names, returns)].
+
+    log: a JSONL file of finished games, appended as they finish. Games
+    already in it (same agents, seed and game count) are not played again, so
+    an interrupted ladder resumes where it stopped."""
     rng = random.Random(seed)
     jobs = []
     counts = {a: 0 for a in agents}
@@ -48,10 +58,28 @@ def play(agents: Sequence[str], players: int, games: int, seed: int, procs: int 
             counts[a] += 1
         rng.shuffle(names)
         jobs.append((names, players, rng.randrange(1 << 30), make))
-    out = []
+    done = {}
+    if log and os.path.exists(log):
+        for line in open(log):
+            try:
+                g = json.loads(line)
+            except json.JSONDecodeError:              # a line cut off by an interruption
+                continue
+            if g["seed"] == seed and g["games"] == games and g["i"] < games \
+                    and g["names"] == jobs[g["i"]][0]:
+                done[g["i"]] = (g["names"], g["returns"])
+    out = list(done.values())
+    todo = [(i, job) for i, job in enumerate(jobs) if i not in done]
+    f = open(log, "a") if log else None
+    if f and f.tell() and open(log, "rb").read()[-1:] != b"\n":
+        f.write("\n")                                 # after a line cut off mid-write
     with mp.get_context(start).Pool(procs or os.cpu_count()) as pool:
-        for names, returns, _ in pool.imap_unordered(_worker, jobs, chunksize=4):
+        for i, (names, returns, _) in pool.imap_unordered(_indexed, todo, chunksize=1):
             out.append((names, returns))
+            if f:
+                f.write(json.dumps({"seed": seed, "games": games, "i": i, "names": names,
+                                    "returns": list(returns)}) + "\n")
+                f.flush()
     return out
 
 
@@ -144,6 +172,8 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--procs", type=int, default=None)
     ap.add_argument("--out", default="", help="write the ladder as JSON here")
+    ap.add_argument("--games-log", default="",
+                    help="append finished games here (JSONL); rerun with it to resume")
     args = ap.parse_args()
     agents = [a for a in args.agents.split(",") if a]
     if not args.no_scripted:
@@ -152,7 +182,7 @@ def main():
         agents += ["rl:" + p for p in run_checkpoints(run)]
     agents = dedupe(agents)
     t0 = time.time()
-    results = play(agents, args.players, args.games, args.seed, args.procs)
+    results = play(agents, args.players, args.games, args.seed, args.procs, log=args.games_log)
     lad = ladder(results, agents)
     report(lad)
     print(f"{len(agents)} agents, {time.time() - t0:.0f}s")
