@@ -29,6 +29,8 @@ e.g. "mcts:100+norm+c3+reuse+om+np+fuel:policy.pt:value.pt"):
          >= 95% posterior against an "unknown player" baseline), and at their
          turns in the tree play the identified style's move instead of
          assuming they search like us. Unidentified opponents are unchanged.
+The value network may differ by player count: "...:policy.pt:a.pt@4|b.pt" uses
+a.pt in 4-player games and b.pt otherwise.
   np     NumPy forward passes for MLP networks (same values up to float
          rounding; avoids PyTorch's per-call overhead).
 """
@@ -212,19 +214,37 @@ class SearchAgent(Agent):
         self.normalize_q = normalize_q
         if value_net is not None and isinstance(value_net, torch.nn.Module):
             value_net = LegacyValue(value_net)
-        self.value_net = value_net if value_net is not None else (load_value(value_path) if value_path else None)
+        # value_path may pick a network per player count: "a.pt@4|b.pt" = a in 4-player games, else b
+        self._values = {}
+        if value_net is None and value_path:
+            for part in value_path.split("|"):
+                path, _, count = part.partition("@")
+                self._values[int(count) if count else None] = load_value(path)
+            value_net = self._values.get(None) or next(iter(self._values.values()))
+        self.value_net = value_net
         self.root_noise = root_noise
         self.noise_alpha = noise_alpha
         self.batch = max(1, batch)
-        self.fast = None
-        if numpy_forward:
-            fast = _NumpyNets(self.net, self.value_net)
-            self.fast = fast if fast.ok else None     # attention value nets stay on PyTorch
+        self._fast_cache = {}
+        self.fast = self._make_fast()
         self.name = f"mcts{sims}"
+
+    def _make_fast(self):
+        if not self.numpy_forward:
+            return None
+        key = id(self.value_net)
+        if key not in self._fast_cache:
+            fast = _NumpyNets(self.net, self.value_net)
+            self._fast_cache[key] = fast if fast.ok else None   # attention value nets stay on PyTorch
+        return self._fast_cache[key]
 
     def reset(self, rules, seat, rng):
         super().reset(rules, seat, rng)
         self.n_players = rules.num_players
+        if self._values:                              # the value network for this player count
+            self.value_net = self._values.get(rules.num_players, self._values.get(None)) \
+                or next(iter(self._values.values()))
+            self.fast = self._make_fast()
         self.enc = Encoder(rules, getattr(self.net, "feature_version", 1))
         if self.value_net is not None:
             assert self.value_net.obs_size == self.enc.size, "value network expects other features"

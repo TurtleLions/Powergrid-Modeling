@@ -342,6 +342,21 @@ class SearchOptionTests(unittest.TestCase):
             self.assertAlmostEqual(sum(returns), 1.0)
             self.assertTrue(any(reused))
 
+    def test_value_network_per_player_count(self):
+        import os
+        import tempfile
+        from bots.rl.value_models import SeatValueNet, save_value
+        with tempfile.TemporaryDirectory() as tmp:
+            rules, fp, fv = self._nets(tmp)
+            other = os.path.join(tmp, "v4.pt")
+            save_value(other, SeatValueNet(Encoder(rules).size, hidden=8, depth=1))
+            a = make(f"mcts:4+norm+np:{fp}:{other}@4|{fv}")
+            for n, want in ((3, None), (4, 4), (5, None)):
+                a.reset(pgcore.Rules(players=n), 0, random.Random(0))
+                self.assertIs(a.value_net, a._values[want])
+            returns, _ = play_game([a] + [make("builder") for _ in range(2)], pgcore.Rules(players=3), 1)
+            self.assertAlmostEqual(sum(returns), 1.0)
+
     def test_opponent_model_identifies_scripted_not_networks(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
