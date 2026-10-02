@@ -67,10 +67,12 @@ class SearchAgent(Agent):
         batch > 1: each round walks `batch` paths down the tree, each node on
         a path counting a provisional visit (virtual loss: value 0) so the
         next path goes elsewhere, then scores all new leaves in one network
-        call. Reading the weights dominates the cost of a network call, so
-        this is several times cheaper per leaf; it explores a little
-        differently, so judge it by strength at equal time. batch = 1 is the
-        plain sequential search."""
+        call: about 2x cheaper per simulation on an idle core. It explores
+        differently and, as implemented, is WEAKER at equal time (ladder
+        2026-10-01, exit5 + v4: b16 at 200 sims -93 Elo vs sequential 100;
+        b16 at 420 -29 vs sequential 200), probably because virtual loss
+        skews the normalised Q. batch = 1, the plain sequential search, is
+        the default."""
         self.path = path
         self.sims = sims
         self.c_puct = c_puct
