@@ -208,6 +208,8 @@ class EvalSet:
 @torch.no_grad()
 def metrics(model, es: EvalSet) -> dict:
     """Scores against the real result, overall and per player count."""
+    if len(es.obs) == 0:
+        return {}
     model.eval()
     p = np.concatenate([model.win_prob(torch.from_numpy(np.asarray(es.obs[i:i + 8192], np.float32)),
                                        torch.from_numpy(es.mask[i:i + 8192])).numpy()
@@ -236,7 +238,7 @@ def metrics(model, es: EvalSet) -> dict:
 
 def eval_sets(a):
     _, te = split(a.dir)
-    sets = {"held": EvalSet.from_dir(a.dir, te)}
+    sets = {"held": EvalSet.from_dir(a.dir, te)} if len(te) else {}
     for path in [p for p in a.search_eval.split(",") if p]:
         if os.path.exists(path):
             sets["search" if path == a.search_eval.split(",")[0] else os.path.basename(path)[:-4]] = \
@@ -265,7 +267,12 @@ def train(a):
         tr = np.concatenate([tr] + [extra] * (a.oversample - 1))
         print("oversampled", len(extra), "positions x", a.oversample, flush=True)
     sets = eval_sets(a)
-    m = SeatValueNet(obs.shape[1], a.arch, a.hidden, a.depth, a.layers, a.loss)
+    if a.init:                                        # fine-tune an existing seat value model
+        ck = torch.load(a.init, map_location="cpu", weights_only=False)
+        m = SeatValueNet(**ck["cfg"])
+        m.load_state_dict(ck["state_dict"])
+    else:
+        m = SeatValueNet(obs.shape[1], a.arch, a.hidden, a.depth, a.layers, a.loss)
     opt = torch.optim.AdamW(m.parameters(), lr=a.lr, weight_decay=1e-4)
     steps = len(tr) // a.batch
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, a.lr, total_steps=steps * a.epochs, pct_start=0.05)
@@ -304,8 +311,9 @@ def train(a):
         log.write(json.dumps(rec) + "\n")
         log.flush()
         print(json.dumps(rec), flush=True)
-        if best is None or rec["held"]["xent"] < best:
-            best = rec["held"]["xent"]
+        score = rec.get("held", {}).get("xent")
+        if score is None or best is None or score < best:   # no held-out games: keep the last epoch
+            best = score
             save_value(f"{a.dir}/{a.name}.pt", m, epoch=epoch, metrics=rec, target=a.target)
     if a.fold >= 0:                                   # out-of-fold predictions
         m.load_state_dict(torch.load(f"{a.dir}/{a.name}.pt", weights_only=False)["state_dict"])
@@ -321,11 +329,33 @@ def train(a):
         print("oof", int((~np.isnan(oof[:, 0])).sum()), flush=True)
 
 
+@torch.no_grad()
+def _model_predictions(path, d, P):
+    """A trained model's predictions for every position (out-of-sample when the
+    model never saw these games, e.g. new games scored by the current best)."""
+    ck = torch.load(path, map_location="cpu", weights_only=False)
+    m = SeatValueNet(**ck["cfg"])
+    m.load_state_dict(ck["state_dict"])
+    m.eval()
+    obs = np.load(f"{d}/obs.npy", mmap_mode="r")
+    out = np.zeros((len(P.start), MAX_SEATS), np.float32)
+    for i in range(0, len(P.start), 4096):
+        pos = np.arange(i, min(i + 4096, len(P.start)))
+        idx, mask = P.index(pos)
+        out[pos] = m.win_prob(torch.from_numpy(gather(obs, idx, mask).astype(np.float32)),
+                              torch.from_numpy(mask)).numpy()
+    return out
+
+
 def targets(a):
-    """TD(lambda) soft targets from the two teachers' out-of-fold predictions."""
-    o0, o1 = np.load(f"{a.dir}/oof_0.npy"), np.load(f"{a.dir}/oof_1.npy")
-    teach = np.where(np.isnan(o0), o1, o0)
+    """TD(lambda) soft targets from the two teachers' out-of-fold predictions,
+    or from --teacher (a model that never saw these games)."""
     P = Positions(a.dir)
+    if a.teacher:
+        teach = _model_predictions(a.teacher, a.dir, P)
+    else:
+        o0, o1 = np.load(f"{a.dir}/oof_0.npy"), np.load(f"{a.dir}/oof_1.npy")
+        teach = np.where(np.isnan(o0), o1, o0)
     idx, mask = P.index(np.arange(len(P.start)))
     win = gather(np.load(f"{a.dir}/win.npy"), idx, mask).astype(np.float32)   # [P, MAX_SEATS]
     game = np.load(f"{a.dir}/game.npy")[P.start]
@@ -393,6 +423,8 @@ def main():
     ap.add_argument("--target", default="")
     ap.add_argument("--lam", type=float, default=0.5)
     ap.add_argument("--ckpts", default="")
+    ap.add_argument("--init", default="", help="train: start from this seat value checkpoint")
+    ap.add_argument("--teacher", default="", help="targets: teacher model instead of oof_*.npy")
     ap.add_argument("--oversample", type=int, default=1,
                     help="train: repeat positions of sources >= --oversample-from this many times")
     ap.add_argument("--oversample-from", type=int, default=2)
