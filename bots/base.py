@@ -28,6 +28,11 @@ class Agent:
         """Return one of state.legal_actions(); state.current_player() == self.seat."""
         raise NotImplementedError
 
+    def observe(self, state, player: int, action: int) -> None:
+        """Every move of the game as it happens, before it is applied: `player`
+        (pgcore.CHANCE for chance outcomes) plays `action` in `state`. A no-op
+        unless the agent uses it (search: opponent modelling, tree reuse)."""
+
     # -- communication (for LLM agents later) ---------------------------------
     def speak(self, state) -> Optional[str]:
         """A message to the table before acting, or None."""

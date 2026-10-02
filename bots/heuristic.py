@@ -299,9 +299,10 @@ class HeuristicAgent(Agent):
 
 def make(name: str) -> Agent:
     """Agent by registry name: a style name, "randomized", "random",
-    "rl:<checkpoint.pt>", or "mcts:<simulations>[+norm][+c<c_puct>][+b<batch>]:<checkpoint.pt>[:<value.pt>]"
-    (norm: min-max normalised Q, b: leaves per network call; see SearchAgent;
-    e.g. "mcts:100+norm+c3+b8:...")."""
+    "rl:<checkpoint.pt>", or "mcts:<simulations>[+norm][+c<c_puct>][+b<batch>][+fuel][+reuse][+om][+np]:<checkpoint.pt>[:<value.pt>]"
+    (norm: min-max normalised Q, b: leaves per network call, fuel: search fuel
+    purchases, reuse: tree reuse, om: opponent modelling, np: NumPy forward
+    passes; see bots/search.py; e.g. "mcts:100+norm+c3+reuse+om+np:...")."""
     from .base import RandomAgent
     if name == "random":
         return RandomAgent()
@@ -313,8 +314,10 @@ def make(name: str) -> Agent:
         _, sims, path, *value = name.split(":")
         sims, *opts = sims.split("+")
         c_puct = [float(o[1:]) for o in opts if o.startswith("c")]
-        batch = [int(o[1:]) for o in opts if o.startswith("b")]
+        batch = [int(o[1:]) for o in opts if o.startswith("b") and o[1:].isdigit()]
         return SearchAgent(path, sims=int(sims), value_path=value[0] if value else "",
                            normalize_q="norm" in opts, c_puct=c_puct[0] if c_puct else 1.5,
-                           batch=batch[0] if batch else 1)
+                           batch=batch[0] if batch else 1, search_fuel="fuel" in opts,
+                           reuse_tree="reuse" in opts, opponent_model="om" in opts,
+                           numpy_forward="np" in opts)
     return HeuristicAgent(name)

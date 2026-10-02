@@ -38,6 +38,7 @@ def play_game(agents: Sequence, rules, seed: int):
         if state.is_chance_node():
             outcomes = state.chance_outcomes()
             a = rng.choices([o for o, _ in outcomes], [p for _, p in outcomes])[0]
+            seat = pgcore.CHANCE
         else:
             seat = state.current_player()
             agent = agents[seat]
@@ -49,6 +50,8 @@ def play_game(agents: Sequence, rules, seed: int):
             a = agent.act(state)
             if a not in state.legal_actions():
                 raise ValueError(f"{agent.name} played illegal action {a}")
+        for watcher in agents:
+            watcher.observe(state, seat, a)
         state.apply_action(a)
     return state.returns(), state.round()
 

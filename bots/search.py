@@ -17,6 +17,20 @@ microsecond) makes this affordable.
 Search runs only where decisions matter most (auctions, building, choosing
 which plant to discard) and only when there is a real choice; routine
 decisions (single fuel units, running plants) use the network directly.
+
+Options (all off by default; agent names take them after the simulation count,
+e.g. "mcts:100+norm+c3+reuse+om+np+fuel:policy.pt:value.pt"):
+  fuel   also search fuel purchases.
+  reuse  keep the subtree of the position actually reached: after our move,
+         the moves played since (seen through Agent.observe) lead down the old
+         tree; if the state there matches exactly, its statistics are reused.
+  om     opponent modelling: identify scripted opponents from their moves
+         (each style's choice is compared with what they played; a style needs
+         >= 95% posterior against an "unknown player" baseline), and at their
+         turns in the tree play the identified style's move instead of
+         assuming they search like us. Unidentified opponents are unchanged.
+  np     NumPy forward passes for MLP networks (same values up to float
+         rounding; avoids PyTorch's per-call overhead).
 """
 from __future__ import annotations
 
@@ -33,10 +47,122 @@ from .rl.model import load
 from .rl.value_models import LegacyValue, load_value
 
 SEARCH_PHASES = ("AUCTION_SELECT", "AUCTION_BID", "AUCTION_DISCARD", "BUILD")
+FUEL_PHASE = "BUY_FUEL"
+CHANCE = -1
+OM_EPS = 0.05          # a scripted style plays its own move with probability 1 - eps
+OM_UNKNOWN = 0.5       # an unidentified player's chance of making any given style's move
+OM_MIN_MOVES = 6       # observed decisions before an opponent can be identified
+OM_CONFIDENCE = 0.95   # posterior mass needed to treat a predicted move as certain
+
+
+class OpponentModel:
+    """Which scripted style (if any) each opponent plays, from their moves."""
+
+    def __init__(self, rules, me: int, rng):
+        import random
+        from .heuristic import STYLES, make
+        self.styles = list(STYLES)
+        self.cands, self.ll, self.unknown, self.count = {}, {}, {}, {}
+        for p in range(rules.num_players):
+            if p == me:
+                continue
+            self.cands[p] = {}
+            for name in self.styles:
+                a = make(name)
+                a.reset(rules, p, random.Random(rng.random()))
+                self.cands[p][name] = a
+            self.ll[p] = {name: 0.0 for name in self.styles}
+            self.unknown[p] = 0.0
+            self.count[p] = 0
+
+    def _act(self, agent, state):
+        agent._plan_key = None                    # the run plan is cached per round
+        return agent.act(state)
+
+    def observe(self, state, player, action):
+        if player not in self.cands:
+            return
+        legal = state.legal_actions()
+        if len(legal) <= 1:
+            return
+        miss = math.log(OM_EPS / (len(legal) - 1))
+        hit = math.log(1 - OM_EPS)
+        best = max(self.ll[player].values())
+        for name in list(self.ll[player]):
+            if self.ll[player][name] < best - 15:  # ruled out: stop paying for it
+                continue
+            self.ll[player][name] += hit if self._act(self.cands[player][name], state) == action else miss
+        self.unknown[player] += math.log(OM_UNKNOWN)
+        self.count[player] += 1
+
+    def posterior(self, player) -> Dict[str, float]:
+        if self.count.get(player, 0) < OM_MIN_MOVES:
+            return {}
+        logits = dict(self.ll[player])
+        logits[None] = self.unknown[player]
+        top = max(logits.values())
+        w = {k: math.exp(v - top) for k, v in logits.items()}
+        z = sum(w.values())
+        return {k: v / z for k, v in w.items() if k is not None and v / z > 0.01}
+
+    def predict(self, state, player) -> Optional[int]:
+        """The engine action this opponent will play, if the model is sure enough."""
+        post = self.posterior(player)
+        if not post:
+            return None
+        mass: Dict[int, float] = {}
+        for name, pr in post.items():
+            a = self._act(self.cands[player][name], state)
+            mass[a] = mass.get(a, 0.0) + pr
+        a, m = max(mass.items(), key=lambda kv: kv[1])
+        return a if m >= OM_CONFIDENCE else None
+
+
+class _NumpyNets:
+    """MLP forward passes in NumPy: the policy net, and an MLP value net if any."""
+
+    def __init__(self, net, value_net):
+        def layers(seq):
+            return [(m.weight.detach().numpy().T.copy(), m.bias.detach().numpy().copy())
+                    for m in seq if isinstance(m, torch.nn.Linear)]
+        self.body = layers(net.body)
+        self.policy = layers([net.policy])[0]
+        self.own_value = layers([net.value])[0]
+        self.value, self.joint = None, False
+        if isinstance(value_net, LegacyValue):
+            self.value = (layers(value_net.net.body), layers([value_net.net.value])[0])
+        elif value_net is not None and getattr(value_net.model, "arch", "") == "mlp":
+            self.value = (layers(value_net.model.enc), layers([value_net.model.value])[0])
+            self.joint = value_net.model.loss == "joint"
+        self.ok = value_net is None or self.value is not None
+
+    @staticmethod
+    def _mlp(layers, x):
+        for W, b in layers:
+            x = np.maximum(x @ W + b, 0.0)
+        return x
+
+    def evaluate(self, obs, mover, mask, has_value_net):
+        h = self._mlp(self.body, obs if not has_value_net else obs[mover:mover + 1])
+        logits = (h[mover if not has_value_net else 0] @ self.policy[0] + self.policy[1])
+        logits = np.where(mask, logits, -1e9)
+        e = np.exp(logits - logits.max())
+        prior = e / e.sum()
+        if not has_value_net:
+            v = (h @ self.own_value[0] + self.own_value[1])[:, 0].astype(np.float64)
+            v = np.clip(v, 1e-3, None)
+            return prior, v / v.sum()
+        enc, head = self.value
+        v = (self._mlp(enc, obs) @ head[0] + head[1])[:, 0].astype(np.float64)
+        if self.joint:
+            e = np.exp(v - v.max())
+            return prior, e / e.sum()
+        v = np.clip(v, 1e-3, None)
+        return prior, v / v.sum()
 
 
 class Node:
-    __slots__ = ("state", "mover", "prior", "amap", "children", "n", "w", "expanded", "value")
+    __slots__ = ("state", "mover", "prior", "amap", "children", "n", "w", "expanded", "value", "forced")
 
     def __init__(self, state):
         self.state = state
@@ -48,13 +174,15 @@ class Node:
         self.w: Optional[np.ndarray] = None
         self.expanded = False
         self.value: Optional[np.ndarray] = None   # network value at expansion (batched search)
+        self.forced: Optional[int] = None          # modelled opponent's move (-1: none), lazily
 
 
 class SearchAgent(Agent):
     def __init__(self, path: str = "", sims: int = 100, c_puct: float = 1.5,
                  phases=SEARCH_PHASES, net=None, root_noise: float = 0.0,
                  noise_alpha: float = 0.3, value_path: str = "", value_net=None,
-                 normalize_q: bool = False, batch: int = 1):
+                 normalize_q: bool = False, batch: int = 1, search_fuel: bool = False,
+                 reuse_tree: bool = False, opponent_model: bool = False, numpy_forward: bool = False):
         """root_noise > 0 mixes Dirichlet(noise_alpha) noise into the root prior
         (for exploration when generating training data; 0 for normal play).
         value_path / value_net: score leaves with this value network instead
@@ -76,7 +204,10 @@ class SearchAgent(Agent):
         self.path = path
         self.sims = sims
         self.c_puct = c_puct
-        self.phases = set(phases)
+        self.phases = set(phases) | ({FUEL_PHASE} if search_fuel else set())
+        self.reuse_tree = reuse_tree
+        self.opponent_model = opponent_model
+        self.numpy_forward = numpy_forward
         self.net = net if net is not None else load(path)
         self.normalize_q = normalize_q
         if value_net is not None and isinstance(value_net, torch.nn.Module):
@@ -85,6 +216,10 @@ class SearchAgent(Agent):
         self.root_noise = root_noise
         self.noise_alpha = noise_alpha
         self.batch = max(1, batch)
+        self.fast = None
+        if numpy_forward:
+            fast = _NumpyNets(self.net, self.value_net)
+            self.fast = fast if fast.ok else None     # attention value nets stay on PyTorch
         self.name = f"mcts{sims}"
 
     def reset(self, rules, seat, rng):
@@ -94,7 +229,20 @@ class SearchAgent(Agent):
         if self.value_net is not None:
             assert self.value_net.obs_size == self.enc.size, "value network expects other features"
         self.actions = AbstractActions(rules)
+        self.om = OpponentModel(rules, seat, rng) if self.opponent_model else None
+        self._last: Optional[Node] = None             # tree reuse: node after our last move
+        self._chosen: Optional[int] = None
+        self._since: List[tuple] = []
         torch.set_num_threads(1)
+
+    def observe(self, state, player, action):
+        if self.om is not None and player >= 0 and player != self.seat:
+            self.om.observe(state, player, action)
+        if self.reuse_tree and self._last is not None:
+            if player == self.seat and action == self._chosen and self._chosen is not None:
+                self._chosen = None                   # our own move: the tree is already there
+            else:
+                self._since.append((player, action))
 
     # ---- network --------------------------------------------------------
     def _features(self, state) -> np.ndarray:
@@ -112,8 +260,11 @@ class SearchAgent(Agent):
         n = self.n_players
         obs = self._features(state)
         mask, amap = self.actions.mask_and_map(state.legal_actions())
-        masks = np.ones((n, self.actions.n), dtype=np.bool_)
         mover = state.current_player()
+        if self.fast is not None:
+            prior, vals = self.fast.evaluate(obs, mover, mask, self.value_net is not None)
+            return {x: float(prior[x]) for x in amap}, amap, vals
+        masks = np.ones((n, self.actions.n), dtype=np.bool_)
         masks[mover] = mask
         x = torch.from_numpy(obs)
         if self.value_net is None:
@@ -139,11 +290,14 @@ class SearchAgent(Agent):
         return (len(state.legal_actions()) > 1
                 and json.loads(state.to_json())["phase"] in self.phases)
 
-    def search(self, state):
-        """Run the search from `state`; returns (visit counts per abstract
-        action, abstract -> engine action map)."""
-        root = Node(state.clone())
-        self._expand(root)
+    def search(self, state, root: Optional[Node] = None):
+        """Run the search from `state` (or continue an existing tree whose root
+        is this state); returns (visit counts per abstract action, abstract ->
+        engine action map)."""
+        if root is None:
+            root = Node(state.clone())
+            self._expand(root)
+        self._root = root
         if len(root.prior) > 1 and self.root_noise > 0:
             keys = list(root.prior)
             noise = np.random.default_rng(self.rng.randrange(1 << 30)).dirichlet(
@@ -165,12 +319,62 @@ class SearchAgent(Agent):
 
     def act(self, state) -> int:
         legal = state.legal_actions()
+        root = self._reused_root(state)
+        self._last, self._since, self._chosen = None, [], None
         if len(legal) == 1:
             return legal[0]
         if not self.wants_search(state):
             return self._greedy(state)
-        visits, amap = self.search(state)
-        return amap[max(visits, key=visits.get)]
+        visits, amap = self.search(state, root)
+        x = max(visits, key=visits.get)
+        if self.reuse_tree:
+            self._last, self._chosen = self._root.children.get(x), amap[x]
+        return amap[x]
+
+    def _reused_root(self, state) -> Optional[Node]:
+        """The old tree's node for `state`, following the moves seen since our last move."""
+        node = self._last
+        if not self.reuse_tree or node is None:
+            return None
+        for player, a in self._since:
+            if node.state.is_chance_node():
+                key = a
+            elif node.forced is not None and node.forced == a:
+                key = ("f", a)
+            elif node.expanded:
+                key = next((x for x, e in node.amap.items() if e == a), None)
+            else:
+                return None
+            node = node.children.get(key)
+            if node is None:
+                return None
+        if not node.expanded or node.state.to_json() != state.to_json():
+            return None
+        return node
+
+    def _forced(self, node: Node) -> Optional[int]:
+        """The modelled opponent's move at this node, if any."""
+        if self.om is None or node.mover < 0 or node.mover == self.seat:
+            return None
+        if node.forced is None:
+            a = self.om.predict(node.state, node.mover)
+            node.forced = -1 if a is None else a
+        return node.forced if node.forced >= 0 else None
+
+    def _step(self, node: Node):
+        """The child to descend to from an expanded decision node."""
+        f = self._forced(node)
+        if f is not None:
+            key, a = ("f", f), f
+        else:
+            key = self._select(node)
+            a = node.amap[key]
+        child = node.children.get(key)
+        if child is None:
+            nxt = node.state.clone()
+            nxt.apply_action(a)
+            child = node.children[key] = Node(nxt)
+        return child
 
     def _expand(self, node: Node) -> np.ndarray:
         node.prior, node.amap, vals = self._evaluate(node.state)
@@ -200,13 +404,7 @@ class SearchAgent(Agent):
             if not node.expanded:
                 vals = self._expand(node)
                 break
-            x = self._select(node)
-            child = node.children.get(x)
-            if child is None:
-                nxt = s.clone()
-                nxt.apply_action(node.amap[x])
-                child = Node(nxt)
-                node.children[x] = child
+            child = self._step(node)
             path.append(child)
             node = child
         for nd in path:
@@ -259,12 +457,7 @@ class SearchAgent(Agent):
             if not node.expanded:
                 vals = None
                 break
-            x = self._select(node)
-            child = node.children.get(x)
-            if child is None:
-                nxt = s.clone()
-                nxt.apply_action(node.amap[x])
-                child = node.children[x] = Node(nxt)
+            child = self._step(node)
             path.append(child)
             node = child
         for nd in path:                       # virtual loss: a visit worth 0 to everyone

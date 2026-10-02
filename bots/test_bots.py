@@ -269,6 +269,93 @@ class FastPathTests(unittest.TestCase):
                 self.assertAlmostEqual(sum(returns), 1.0)
 
 
+class SearchOptionTests(unittest.TestCase):
+    def _nets(self, tmp):
+        import os
+        import torch
+        from bots.rl.features import FEATURE_VERSION
+        from bots.rl.model import PolicyValueNet, save
+        from bots.rl.value_models import SeatValueNet, save_value
+        rules = pgcore.Rules(players=4)
+        torch.manual_seed(0)
+        size, n = Encoder(rules).size, AbstractActions(rules).n
+        pnet = PolicyValueNet(size, n, 32)
+        pnet.feature_version = FEATURE_VERSION
+        fp, fv = os.path.join(tmp, "p.pt"), os.path.join(tmp, "v.pt")
+        save(fp, pnet)
+        save_value(fv, SeatValueNet(size, hidden=16, depth=2))
+        return rules, fp, fv
+
+    def _first_search_state(self, agent, rules):
+        state = pgcore.State(rules)
+        while state.is_chance_node() or not agent.wants_search(state):
+            if state.is_chance_node():
+                state.apply_action(state.chance_outcomes()[0][0])
+            else:
+                state.apply_action(state.legal_actions()[0])
+        return state
+
+    def test_options_parse_and_play_legal_games(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            rules, fp, fv = self._nets(tmp)
+            a = make(f"mcts:8+norm+c3+fuel+reuse+om+np:{fp}:{fv}")
+            self.assertTrue(a.reuse_tree and a.opponent_model and a.fast is not None)
+            self.assertIn("BUY_FUEL", a.phases)
+            plain = make(f"mcts:8+norm+c3:{fp}:{fv}")
+            self.assertFalse(plain.reuse_tree or plain.opponent_model or plain.fast is not None)
+            returns, _ = play_game([a] + [make("builder") for _ in range(3)], rules, 4)
+            self.assertAlmostEqual(sum(returns), 1.0)
+
+    def test_numpy_forward_matches_torch(self):
+        import tempfile
+        import numpy as np
+        with tempfile.TemporaryDirectory() as tmp:
+            rules, fp, fv = self._nets(tmp)
+            for value in (fv, ""):
+                torch_agent = make(f"mcts:8:{fp}" + (f":{value}" if value else ""))
+                np_agent = make(f"mcts:8+np:{fp}" + (f":{value}" if value else ""))
+                for ag in (torch_agent, np_agent):
+                    ag.reset(rules, 0, random.Random(0))
+                state = self._first_search_state(torch_agent, rules)
+                p1, _, v1 = torch_agent._evaluate(state)
+                p2, _, v2 = np_agent._evaluate(state)
+                self.assertTrue(np.allclose([p1[x] for x in p1], [p2[x] for x in p1], atol=1e-5))
+                self.assertTrue(np.allclose(v1, v2, atol=1e-5))
+
+    def test_tree_reuse_reuses_the_reached_subtree(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            rules, fp, fv = self._nets(tmp)
+            a = make(f"mcts:30+norm+c3+reuse:{fp}:{fv}")
+            reused = []
+            original = a._reused_root
+
+            def spy(state):
+                node = original(state)
+                reused.append(node is not None)
+                if node is not None:            # a reused root is exactly the current state
+                    self.assertEqual(node.state.to_json(), state.to_json())
+                return node
+            a._reused_root = spy
+            returns, _ = play_game([a] + [make("builder") for _ in range(3)], rules, 2)
+            self.assertAlmostEqual(sum(returns), 1.0)
+            self.assertTrue(any(reused))
+
+    def test_opponent_model_identifies_scripted_not_networks(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            rules, fp, fv = self._nets(tmp)
+            a = make(f"mcts:4+norm+om:{fp}:{fv}")
+            play_game([a, make("builder"), make(f"rl:{fp}"), make("tycoon")], rules, 3)
+            top = {p: max(a.om.posterior(p).items(), key=lambda kv: kv[1], default=(None, 0.0))
+                   for p in (1, 2, 3)}
+            self.assertEqual(top[1][0], "builder")
+            self.assertGreater(top[1][1], 0.95)
+            self.assertEqual(top[3][0], "tycoon")
+            self.assertLess(top[2][1], 0.95)    # the network is not mistaken for a script
+
+
 class ArenaTests(unittest.TestCase):
     def test_scripted_bots_play_legal_games_to_the_end(self):
         for players in (3, 4, 5):
