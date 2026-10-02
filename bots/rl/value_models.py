@@ -42,17 +42,22 @@ class SeatValueNet(nn.Module):
         self.aux = nn.Linear(d, 1)               # final margin, a training aid only
         self.cfg = dict(obs=obs, arch=arch, hidden=hidden, depth=depth, layers=layers, loss=loss)
 
-    def forward(self, x):                         # x [B, seats, obs]
+    def forward(self, x, mask=None):              # x [B, seats, obs]; mask [B, seats], True = real seat
         h = self.enc(x)
         if self.arch == "attn":
-            h = self.mix(self.proj(h))
+            h = self.mix(self.proj(h), src_key_padding_mask=None if mask is None else ~mask)
         return self.value(h).squeeze(-1), self.aux(h).squeeze(-1)
 
-    def win_prob(self, x):
-        v, _ = self(x)
+    def win_prob(self, x, mask=None):
+        """Win shares over the real seats (padding seats get 0)."""
+        v, _ = self(x, mask)
         if self.loss == "joint":
+            if mask is not None:
+                v = v.masked_fill(~mask, -1e9)
             return torch.softmax(v, -1)
         v = v.clamp(min=1e-3)
+        if mask is not None:
+            v = v * mask
         return v / v.sum(-1, keepdim=True)
 
 

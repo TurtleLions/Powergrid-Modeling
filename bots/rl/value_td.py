@@ -41,7 +41,6 @@ import torch.nn.functional as F
 
 from .value_models import LegacyValue, SeatValueNet, save_value
 
-N_SEATS = 4
 
 
 # ---------------------------------------------------------------------------
@@ -72,13 +71,21 @@ def npz_member(path, key, rows=None):
     return out
 
 
+MAX_SEATS = 6      # positions are padded to this many seats (features.MAX_PLAYERS)
+
+
+def _players(path) -> int:
+    return int(np.load(path)["players"])
+
+
 def prep(a):
     os.makedirs(a.dir, exist_ok=True)
     files = a.sources.split(",")
+    players = [_players(p) for p in files]
     sizes = [_open_member(p, "obs")[1][0] for p in files]
     if a.max_rows:
         sizes = [min(s, max(0, a.max_rows - sum(sizes[:i]))) for i, s in enumerate(sizes)]
-        sizes = [s - s % (N_SEATS * 24) for s in sizes]      # whole games
+        sizes = [s - s % (n * 24) for s, n in zip(sizes, players)]   # whole games
     width = _open_member(files[0], "obs")[1][1]
     obs = np.lib.format.open_memmap(f"{a.dir}/obs.npy", "w+", np.float16, (sum(sizes), width))
     i = 0
@@ -92,12 +99,50 @@ def prep(a):
     for k in ("win", "margin", "game", "round"):
         np.save(f"{a.dir}/{k}.npy", np.concatenate([npz_member(p, k, n) for p, n in zip(files, sizes)]))
     np.save(f"{a.dir}/source.npy", np.concatenate([np.full(n, i, np.int8) for i, n in enumerate(sizes)]))
+    # positions: consecutive blocks of `players` rows (one per seat)
+    pstart, pn, off = [], [], 0
+    for n_rows, k in zip(sizes, players):
+        pstart.append(off + np.arange(0, n_rows, k))
+        pn.append(np.full(n_rows // k, k, np.int8))
+        off += n_rows
+    np.save(f"{a.dir}/pstart.npy", np.concatenate(pstart))
+    np.save(f"{a.dir}/pn.npy", np.concatenate(pn))
     groups = [g.split(",") for g in a.split_groups.split(";")] if a.split_groups else [files]
     assert sorted(sum(groups, [])) == sorted(files), "--split-groups must partition --sources"
-    json.dump({"sources": files, "rows": sizes, "split_groups": groups}, open(f"{a.dir}/prep.json", "w"))
+    json.dump({"sources": files, "rows": sizes, "players": players, "split_groups": groups},
+              open(f"{a.dir}/prep.json", "w"))
+    pos = Positions(a.dir)
     game = np.load(f"{a.dir}/game.npy")
-    assert (game.reshape(-1, N_SEATS) == game.reshape(-1, N_SEATS)[:, :1]).all()
-    print("rows", i, "games", len(np.unique(game)), flush=True)
+    for k in range(1, MAX_SEATS):                    # every seat of a position is the same game
+        sel = pos.n > k
+        assert (game[pos.start[sel] + k] == game[pos.start[sel]]).all()
+    print("rows", i, "positions", len(pos.start), "games", len(np.unique(game)),
+          "by players", {int(k): int((pos.n == k).sum()) for k in np.unique(pos.n)}, flush=True)
+
+
+class Positions:
+    """Where each position's rows are (positions have 3-6 seats), padded to MAX_SEATS."""
+
+    def __init__(self, d):
+        if os.path.exists(f"{d}/pstart.npy"):
+            self.start, self.n = np.load(f"{d}/pstart.npy"), np.load(f"{d}/pn.npy").astype(np.int64)
+        else:                                         # dirs prepared before mixed player counts: 4 seats
+            rows = len(np.load(f"{d}/win.npy", mmap_mode="r"))
+            self.start, self.n = np.arange(0, rows, 4), np.full(rows // 4, 4)
+
+    def index(self, pos):
+        """Row index [B, MAX_SEATS] (padding repeats the first row) and seat mask."""
+        mask = np.arange(MAX_SEATS)[None, :] < self.n[pos][:, None]
+        idx = np.where(mask, self.start[pos][:, None] + np.arange(MAX_SEATS)[None, :],
+                       self.start[pos][:, None])
+        return idx, mask
+
+
+def gather(arr, idx, mask):
+    """Padded per-seat values of `arr` ([rows] or [rows, F]); padding seats are 0."""
+    x = np.asarray(arr[idx.ravel()]).reshape(idx.shape + arr.shape[1:])
+    m = mask.reshape(mask.shape + (1,) * (x.ndim - 2))
+    return np.where(m, x, 0)
 
 
 def split(d):
@@ -110,12 +155,9 @@ def split(d):
     for group in info.get("split_groups", [info["sources"]]):
         allg = np.unique(np.concatenate([npz_member(p, "game") for p in group]))
         held.append(np.random.default_rng(0).choice(allg, int(len(allg) * 0.05), replace=False))
-    pos_te = np.isin(np.load(f"{d}/game.npy"), np.concatenate(held))[::N_SEATS]
+    pos = Positions(d)
+    pos_te = np.isin(np.load(f"{d}/game.npy")[pos.start], np.concatenate(held))
     return np.flatnonzero(~pos_te), np.flatnonzero(pos_te)
-
-
-def _rows(pos):
-    return (pos[:, None] * N_SEATS + np.arange(N_SEATS)).ravel()
 
 
 # ---------------------------------------------------------------------------
@@ -127,39 +169,78 @@ class _LegacyModel(torch.nn.Module):
         from .model import load
         self.inner = LegacyValue(load(path))
 
-    def win_prob(self, x):
+    def win_prob(self, x, mask=None):
         v = self.inner.net.value(self.inner.net.body(x)).squeeze(-1).clamp(min=1e-3)
+        if mask is not None:
+            v = v * mask
         return v / v.sum(-1, keepdim=True)
 
 
+class EvalSet:
+    """Positions to score against the real result: obs [P, MAX_SEATS, F] (float16),
+    win [P, MAX_SEATS], mask, round [P], players [P]."""
+
+    def __init__(self, obs, win, mask, rnd, n):
+        self.obs, self.win, self.mask, self.rnd, self.n = obs, win, mask, rnd, n
+
+    @classmethod
+    def from_dir(cls, d, pos):
+        P = Positions(d)
+        idx, mask = P.index(pos)
+        obs = np.load(f"{d}/obs.npy", mmap_mode="r")
+        return cls(gather(obs, idx, mask), gather(np.load(f"{d}/win.npy"), idx, mask), mask,
+                   np.load(f"{d}/round.npy")[P.start[pos]], P.n[pos])
+
+    @classmethod
+    def from_npz(cls, path):
+        """A file from bots/rl/value.py gen (one player count)."""
+        s = np.load(path)
+        k = int(s["players"]) if "players" in s else 4
+        obs, win, rnd = s["obs"], s["win"], s["round"]
+        P = len(win) // k
+        pad = ((0, 0), (0, MAX_SEATS - k))
+        mask = np.zeros((P, MAX_SEATS), bool)
+        mask[:, :k] = True
+        return cls(np.pad(obs.reshape(P, k, -1), pad + ((0, 0),)), np.pad(win.reshape(P, k), pad), mask,
+                   rnd[::k], np.full(P, k))
+
+
 @torch.no_grad()
-def metrics(model, obs, win, rnd) -> dict:
-    """obs [P, seats, obs], win [P, seats], rnd [P] -> scores against the real result."""
+def metrics(model, es: EvalSet) -> dict:
+    """Scores against the real result, overall and per player count."""
     model.eval()
-    p = np.concatenate([model.win_prob(torch.from_numpy(np.asarray(obs[i:i + 8192], np.float32))).numpy()
-                        for i in range(0, len(obs), 8192)])
-    out = {"mse": float(np.mean((p - win) ** 2)), "corr": float(np.corrcoef(p.ravel(), win.ravel())[0, 1]),
-           "xent": float(-(win * np.log(np.clip(p, 1e-6, 1))).sum(1).mean()),
-           "pick": float(win[np.arange(len(p)), p.argmax(1)].mean())}
-    for lo, hi in ((1, 3), (4, 7), (8, 12), (13, 99)):
-        s = (rnd >= lo) & (rnd <= hi)
-        if s.any():
-            out[f"pick_r{lo}-{hi}"] = float(win[s][np.arange(s.sum()), p[s].argmax(1)].mean())
+    p = np.concatenate([model.win_prob(torch.from_numpy(np.asarray(es.obs[i:i + 8192], np.float32)),
+                                       torch.from_numpy(es.mask[i:i + 8192])).numpy()
+                        for i in range(0, len(es.obs), 8192)])
     model.train()
-    return {k: round(v, 4) for k, v in out.items()}
+
+    def score(sel):
+        w, q, m = es.win[sel], p[sel], es.mask[sel]
+        out = {"mse": float(((q - w) ** 2)[m].mean()), "corr": float(np.corrcoef(q[m], w[m])[0, 1]),
+               "xent": float(-(w * np.log(np.clip(q, 1e-6, 1))).sum(1).mean()),
+               "pick": float(w[np.arange(len(q)), np.where(m, q, -1).argmax(1)].mean())}
+        return {k: round(v, 4) for k, v in out.items()}
+
+    out = score(np.ones(len(p), bool))
+    ns = np.unique(es.n)
+    if len(ns) > 1:
+        for k in ns:
+            out[f"p{k}"] = score(es.n == k)
+    for lo, hi in ((1, 3), (4, 7), (8, 12), (13, 99)):
+        s = (es.rnd >= lo) & (es.rnd <= hi)
+        if s.any():
+            q = np.where(es.mask[s], p[s], -1)
+            out[f"pick_r{lo}-{hi}"] = round(float(es.win[s][np.arange(s.sum()), q.argmax(1)].mean()), 4)
+    return out
 
 
 def eval_sets(a):
-    obs = np.load(f"{a.dir}/obs.npy", mmap_mode="r")
-    win, rnd = np.load(f"{a.dir}/win.npy"), np.load(f"{a.dir}/round.npy")
     _, te = split(a.dir)
-    r = _rows(te)
-    sets = {"held": (np.asarray(obs[r]).reshape(len(te), N_SEATS, -1), win[r].reshape(-1, N_SEATS),
-                     rnd[r][::N_SEATS])}
-    if a.search_eval and os.path.exists(a.search_eval):
-        s = np.load(a.search_eval)
-        sets["search"] = (s["obs"].reshape(-1, N_SEATS, s["obs"].shape[1]), s["win"].reshape(-1, N_SEATS),
-                          s["round"][::N_SEATS])
+    sets = {"held": EvalSet.from_dir(a.dir, te)}
+    for path in [p for p in a.search_eval.split(",") if p]:
+        if os.path.exists(path):
+            sets["search" if path == a.search_eval.split(",")[0] else os.path.basename(path)[:-4]] = \
+                EvalSet.from_npz(path)
     return sets
 
 
@@ -171,14 +252,15 @@ def train(a):
     torch.set_num_threads(a.threads)
     obs = np.load(f"{a.dir}/obs.npy", mmap_mode="r")
     win, margin = np.load(f"{a.dir}/win.npy"), np.load(f"{a.dir}/margin.npy")
+    P = Positions(a.dir)
     tr, _ = split(a.dir)
-    pgame = np.load(f"{a.dir}/game.npy")[::N_SEATS]
+    pgame = np.load(f"{a.dir}/game.npy")[P.start]
     if a.fold >= 0:                                   # teacher: train on the other fold
         other = tr[pgame[tr] % 2 == a.fold]
         tr = tr[pgame[tr] % 2 != a.fold]
-    target = np.load(f"{a.dir}/{a.target}") if a.target else None
+    target = np.load(f"{a.dir}/{a.target}") if a.target else None    # [P, MAX_SEATS]
     if a.oversample > 1:                              # repeat positions from later sources
-        src = np.load(f"{a.dir}/source.npy")[::N_SEATS]
+        src = np.load(f"{a.dir}/source.npy")[P.start]
         extra = tr[src[tr] >= a.oversample_from]
         tr = np.concatenate([tr] + [extra] * (a.oversample - 1))
         print("oversampled", len(extra), "positions x", a.oversample, flush=True)
@@ -195,13 +277,16 @@ def train(a):
         tot = np.zeros(2)
         for s in range(steps):
             pos = np.sort(tr[s * a.batch:(s + 1) * a.batch])
-            r = _rows(pos)
-            x = torch.from_numpy(np.asarray(obs[r], np.float32)).view(len(pos), N_SEATS, -1)
-            w = torch.from_numpy(win[r]).view(len(pos), N_SEATS) if target is None \
-                else torch.from_numpy(target[pos])
-            v, mg = m(x)
-            lv = -(w * F.log_softmax(v, -1)).sum(-1).mean() if a.loss == "joint" else F.mse_loss(v, w)
-            lm = F.mse_loss(mg, torch.from_numpy(margin[r]).view(len(pos), N_SEATS))
+            idx, mask = P.index(pos)
+            x = torch.from_numpy(gather(obs, idx, mask).astype(np.float32))
+            mk = torch.from_numpy(mask)
+            w = torch.from_numpy(gather(win, idx, mask) if target is None else target[pos])
+            v, mg = m(x, mk)
+            if a.loss == "joint":
+                lv = -(w * F.log_softmax(v.masked_fill(~mk, -1e9), -1)).sum(-1).mean()
+            else:
+                lv = ((v - w) ** 2)[mk].mean()
+            lm = ((mg - torch.from_numpy(gather(margin, idx, mask))) ** 2)[mk].mean()
             loss = lv + a.aux_coef * lm
             opt.zero_grad()
             loss.backward()
@@ -214,8 +299,8 @@ def train(a):
                       flush=True)
         rec = {"epoch": epoch, "train_value": round(tot[0] / steps, 4),
                "train_margin": round(tot[1] / steps, 4), "s": round(time.time() - t0)}
-        for k, (o, w_, r_) in sets.items():
-            rec[k] = metrics(m, o, w_, r_)
+        for k, es in sets.items():
+            rec[k] = metrics(m, es)
         log.write(json.dumps(rec) + "\n")
         log.flush()
         print(json.dumps(rec), flush=True)
@@ -225,12 +310,13 @@ def train(a):
     if a.fold >= 0:                                   # out-of-fold predictions
         m.load_state_dict(torch.load(f"{a.dir}/{a.name}.pt", weights_only=False)["state_dict"])
         m.eval()
-        oof = np.full((len(pgame), N_SEATS), np.nan, np.float32)
+        oof = np.full((len(P.start), MAX_SEATS), np.nan, np.float32)
         with torch.no_grad():
             for i in range(0, len(other), 4096):
                 pos = other[i:i + 4096]
-                x = torch.from_numpy(np.asarray(obs[_rows(pos)], np.float32)).view(len(pos), N_SEATS, -1)
-                oof[pos] = m.win_prob(x).numpy()
+                idx, mask = P.index(pos)
+                x = torch.from_numpy(gather(obs, idx, mask).astype(np.float32))
+                oof[pos] = m.win_prob(x, torch.from_numpy(mask)).numpy()
         np.save(f"{a.dir}/oof_{a.fold}.npy", oof)
         print("oof", int((~np.isnan(oof[:, 0])).sum()), flush=True)
 
@@ -239,27 +325,31 @@ def targets(a):
     """TD(lambda) soft targets from the two teachers' out-of-fold predictions."""
     o0, o1 = np.load(f"{a.dir}/oof_0.npy"), np.load(f"{a.dir}/oof_1.npy")
     teach = np.where(np.isnan(o0), o1, o0)
-    win = np.load(f"{a.dir}/win.npy").reshape(-1, N_SEATS)
-    game = np.load(f"{a.dir}/game.npy")[::N_SEATS]
-    rnd = np.load(f"{a.dir}/round.npy")[::N_SEATS]
+    P = Positions(a.dir)
+    idx, mask = P.index(np.arange(len(P.start)))
+    win = gather(np.load(f"{a.dir}/win.npy"), idx, mask).astype(np.float32)   # [P, MAX_SEATS]
+    game = np.load(f"{a.dir}/game.npy")[P.start]
+    rnd = np.load(f"{a.dir}/round.npy")[P.start]
     tr, _ = split(a.dir)
     assert not np.isnan(teach[tr]).any()
-    out = win.astype(np.float32).copy()               # held-out positions keep the real result
+    out = win.copy()                                  # held-out positions keep the real result
     order = tr[np.lexsort((rnd[tr], game[tr]))]       # by game, then round
     gs = game[order]
     starts = np.flatnonzero(np.r_[True, gs[1:] != gs[:-1]])
     for s0, e0 in zip(starts, np.r_[starts[1:], len(order)]):
-        idx = order[s0:e0]
-        r = rnd[idx]
-        g = np.empty((len(idx), N_SEATS), np.float32)
-        nxt = len(idx)                                # first position of a later round
-        for i in range(len(idx) - 1, -1, -1):
-            if i + 1 < len(idx) and r[i + 1] > r[i]:
+        idx_g = order[s0:e0]
+        r = rnd[idx_g]
+        g = np.empty((len(idx_g), MAX_SEATS), np.float32)
+        nxt = len(idx_g)                              # first position of a later round
+        for i in range(len(idx_g) - 1, -1, -1):
+            if i + 1 < len(idx_g) and r[i + 1] > r[i]:
                 nxt = i + 1
-            g[i] = win[idx[i]] if nxt == len(idx) else (1 - a.lam) * teach[idx[nxt]] + a.lam * g[nxt]
-        out[idx] = g
+            g[i] = win[idx_g[i]] if nxt == len(idx_g) else \
+                (1 - a.lam) * teach[idx_g[nxt]] + a.lam * g[nxt]
+        out[idx_g] = g
+    out[~mask] = 0.0
     np.save(f"{a.dir}/target_l{a.lam:g}.npy", out)
-    print(f"lam {a.lam}: mean |target - result| {np.abs(out[tr] - win[tr]).mean():.4f}", flush=True)
+    print(f"lam {a.lam}: mean |target - result| {np.abs(out[tr] - win[tr])[mask[tr]].mean():.4f}", flush=True)
 
 
 def evaluate(a):
@@ -271,7 +361,7 @@ def evaluate(a):
             m.load_state_dict(ck["state_dict"])
         else:
             m = _LegacyModel(c)
-        print(c, json.dumps({k: metrics(m, *v) for k, v in sets.items()}), flush=True)
+        print(c, json.dumps({k: metrics(m, es) for k, es in sets.items()}), flush=True)
 
 
 def main():
@@ -286,7 +376,7 @@ def main():
     ap.add_argument("--split-groups", default="",
                     help="prep: ';'-separated groups of sources, 5%% of each group's games held out")
     ap.add_argument("--search-eval", default="runs/varch/search_eval.npz",
-                    help="positions from searched games (value.py gen --agents mcts:...)")
+                    help="comma-separated value.py gen files scored every epoch (e.g. searched games)")
     ap.add_argument("--name", default="value")
     ap.add_argument("--arch", default="attn")
     ap.add_argument("--hidden", type=int, default=512)

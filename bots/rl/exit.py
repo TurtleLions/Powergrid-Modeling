@@ -24,8 +24,10 @@ Each generation:
     cannot make the shared layers forget them. Training reuses the last
     --buffer-gens generations of data.
  3. Gate: search with the new policy (--gate-sims, same value network) plays
-    three copies of search with the best policy; best.pt advances only if it
-    is not worse (>= 1/N). The final bot searches, and a policy that helps
+    N-1 copies of search with the best policy; best.pt advances only if it
+    is not worse: its share times N is at least 1 (a fair share), averaged
+    over the player counts when --player-counts mixes them (e.g. 3,4,5,6;
+    each self-play game then draws its count). The final bot searches, and a policy that helps
     search need not play better on its own: runs/exit3's raw-vs-raw gate
     rejected every generation after gen 6 while search with gen 6 was +79 Elo
     over search with its starting policy. The raw result (vs_best_raw) and
@@ -82,6 +84,7 @@ class Config:
     out: str = "runs/exit"
     init: str = "runs/league3/champion.pt"
     players: int = 4
+    player_counts: str = ""       # e.g. "3,4,5,6": each game draws its count (overrides players)
     map: str = "germany"
     generations: int = 12
     workers: int = max(1, (os.cpu_count() or 2) - 2)
@@ -123,8 +126,12 @@ def _play(job):
     torch.set_num_threads(1)
     rng = random.Random(seed)
     np.random.seed(seed % (1 << 31))
-    rules = pgcore.Rules(players=cfg.players, map=cfg.map)
-    acts = AbstractActions(rules)
+    counts = _counts(cfg)
+    by_count = {}
+    for k in counts:                                  # regions, step 2, game end per player count
+        r = pgcore.Rules(players=k, map=cfg.map)
+        by_count[k] = (r, AbstractActions(r))
+    rules, acts = by_count[counts[0]]
     net = PolicyValueNet(meta["obs_size"], meta["n_actions"], meta["hidden"])
     net.load_state_dict(torch.load(io.BytesIO(weights), weights_only=False))
     net.feature_version = meta["feature_version"]
@@ -138,7 +145,10 @@ def _play(job):
     val_obs, val_z = [], []
     results = []
     for _ in range(cfg.games_per_worker):
-        n = cfg.players
+        n = rng.choice(counts)
+        rules, acts = by_count[n]
+        enc = Encoder(rules, net.feature_version)
+        searcher.reset(rules, 0, random.Random(rng.random()))
         if rng.random() < cfg.p_selfplay:
             lineup = [LEARNER] * n
         else:
@@ -167,7 +177,8 @@ def _play(job):
                 state.apply_action(others[seat].act(state))
                 continue
             v = json.loads(state.to_json())
-            obs = enc._encode(state, v, seat)
+            obs = state.features(seat) if hasattr(state, "features") and enc.version == 2 \
+                else enc._encode(state, v, seat)          # identical; C++ when available
             seat_vals[seat].append(len(val_obs))
             val_obs.append(obs)
             legal = state.legal_actions()
@@ -275,6 +286,19 @@ def policy_fit(net, data) -> dict:
             "agree": round(agree.mean().item(), 4), "n": int(sel.sum())}
 
 
+def _counts(cfg):
+    return [int(k) for k in cfg.player_counts.split(",")] if cfg.player_counts else [cfg.players]
+
+
+def per_count(cfg, focus, opponents, games, seed):
+    """worst_case at every player count (games split evenly); returns
+    ({count: result}, mean over counts of the worst share x players: 1.0 = a fair share)."""
+    counts = _counts(cfg)
+    res = {k: worst_case(focus, opponents, k, max(1, games // len(counts)), seed,
+                         procs=cfg.workers, start="spawn") for k in counts}
+    return res, float(np.mean([r["worst"] * k for k, r in res.items()]))
+
+
 def search_name(cfg, policy: str, value: str, sims: int) -> str:
     opts = f"{sims}" + ("+norm" if cfg.normalize_q else "") + f"+c{cfg.c_puct:g}"
     return f"mcts:{opts}:{policy}" + (f":{value}" if value else "")
@@ -343,15 +367,15 @@ def main():
             held_fit = {}
             if held is not None:
                 held_fit = {"held_new": policy_fit(net, held), "held_best": policy_fit(load(best), held)}
-            gate = worst_case(search_name(cfg, path, value_path, cfg.gate_sims),
-                              [search_name(cfg, best, value_path, cfg.gate_sims)], cfg.players,
-                              cfg.gate_games, gen, procs=cfg.workers, start="spawn")["worst"]
-            gate_raw = worst_case("rl:" + path, ["rl:" + best], cfg.players, cfg.gate_raw_games,
-                                  gen, procs=cfg.workers, start="spawn")["worst"]
-            scripted_eval = worst_case("rl:" + path, DEFAULT_OPPONENTS, cfg.players,
-                                       cfg.eval_games, 1000 + gen, procs=cfg.workers,
-                                       start="spawn")
-            accepted = gate >= 1.0 / cfg.players
+            gate_res, gate = per_count(cfg, search_name(cfg, path, value_path, cfg.gate_sims),
+                                       [search_name(cfg, best, value_path, cfg.gate_sims)],
+                                       cfg.gate_games, gen)
+            _, gate_raw = per_count(cfg, "rl:" + path, ["rl:" + best], cfg.gate_raw_games, gen)
+            evals, _ = per_count(cfg, "rl:" + path, DEFAULT_OPPONENTS, cfg.eval_games * len(_counts(cfg)),
+                                 1000 + gen)
+            worst_k = min(evals, key=lambda k: evals[k]["worst"] * k)
+            scripted_eval = evals[worst_k]
+            accepted = gate >= 1.0                    # search vs best: at least a fair share
             if accepted:
                 shutil.copyfile(path, best)
             elif cfg.reset_on_reject:
@@ -371,6 +395,8 @@ def main():
                    "train_s": round(t_train), "gate_s": round(t_gate), **stats, **held_fit,
                    "learner_share_vs_league": round(float(np.mean(vs_league)), 3) if vs_league else None,
                    "vs_best": round(gate, 3), "vs_best_raw": round(gate_raw, 3),
+                   "vs_best_by_count": {k: round(r["worst"], 3) for k, r in gate_res.items()},
+                   "worst_by_count": {k: round(r["worst"], 3) for k, r in evals.items()},
                    "accepted": accepted, "value": value_path, **value_rec,
                    "worst": round(scripted_eval["worst"], 3),
                    "worst_opponent": scripted_eval["worst_opponent"],
