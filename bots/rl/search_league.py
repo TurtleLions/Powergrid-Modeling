@@ -16,12 +16,16 @@ Each iteration:
     so their held-out games stay unseen), TD(lambda) targets from the best net
     (it never saw the new games); league games oversampled (--oversample).
     --finetune 0 retrains from scratch on everything (out-of-fold teachers).
- 3. Gate: 1 x candidate vs (n-1) x best at every player count; accepted if its
-    share x players, pooled over counts, is at least 1 (a fair share). The old
-    best then joins the pool.
- 4. Benchmark: an Elo ladder (bots/rating.py) per player count over the best,
+ 3. Policy: the best policy fine-tuned on the search targets recorded in the
+    league games (bots/rl/policy_distill.py: root visit distributions of every
+    search decision, all player counts).
+ 4. Gate: 1 x candidate vs (n-1) x best at every player count; accepted if its
+    share x players, pooled over counts, is at least 1 (a fair share). The
+    candidate is new policy + new value, then (if that fails) the best policy
+    + new value. The old best joins the pool.
+ 5. Benchmark: an Elo ladder (bots/rating.py) per player count over the best,
     the pool and anchors. The scripted worst case is a floor, not the metric.
- 5. Every --exploit-every iterations, an exploiter: a value network fine-tuned
+ 6. Every --exploit-every iterations, an exploiter: a value network fine-tuned
     only on games against the frozen best (one exploiter seat, the rest the
     best), twice in a row, so its search learns what wins against that
     particular agent. If it beats the best head to head (lower 95% bound of
@@ -43,6 +47,8 @@ import os
 import subprocess
 import sys
 import time
+
+import numpy as np
 
 PY = sys.executable
 COUNTS = (3, 4, 5, 6)
@@ -85,6 +91,16 @@ def label(name: str) -> str:
     return f"[{opts}] {run(policy)} {run(value)}"
 
 
+def split_spec(spec, default_policy):
+    """Pool / best entries are 'value.pt' or 'policy.pt|value.pt'."""
+    return spec.split("|", 1) if "|" in spec else (default_policy, spec)
+
+
+def agent_of(cfg, spec):
+    policy, value = split_spec(spec, cfg.policy)
+    return agent(cfg, value, policy)
+
+
 def agent(cfg, value, policy=None):
     return f"mcts:{cfg.options}:{policy or cfg.policy}:{value}"
 
@@ -101,6 +117,9 @@ class League:
                       "league_data": [p for p in cfg.seed_data.split(",") if p], "done": [],
                       "history": []}
             self.save()
+
+    def best_spec(self):
+        return f"{self.s.get('best_policy', self.cfg.policy)}|{self.s['best']}"
 
     # ---- bookkeeping ------------------------------------------------------
     def save(self):
@@ -191,7 +210,7 @@ class League:
         return ck
 
     def ladder(self, it):
-        agents = [agent(self.cfg, self.s["best"])] + [agent(self.cfg, v) for v in self.s["pool"][-4:]] \
+        agents = [agent_of(self.cfg, self.best_spec())] + [agent_of(self.cfg, v) for v in self.s["pool"][-4:]] \
             + ["mcts:100+norm+c3:runs/exit5/best.pt:runs/value4/mlp_l0.5.pt",   # 2026-10-01's agent
                "mcts:100+norm+c3:runs/exit3/best.pt:runs/value1/big_aux05.pt",  # 2026-09-30's agent
                "rl:runs/league3/champion.pt"]                                   # raw-network anchor
@@ -212,8 +231,10 @@ class League:
     def iterate(self):
         cfg, it = self.cfg, self.s["iteration"] + 1
         best = self.s["best"]
+        best_policy = self.s.get("best_policy", cfg.policy)
         pool = self.s["pool"][-cfg.pool_size:]
-        seats = [agent(cfg, best)] * cfg.w_best + [agent(cfg, v) for v in pool for _ in range(cfg.w_pool)] \
+        seats = [agent(cfg, best, best_policy)] * cfg.w_best \
+            + [agent_of(cfg, v) for v in pool for _ in range(cfg.w_pool)] \
             + [s for s in SCRIPTED for _ in range(cfg.w_scripted)]
         self.log(f"iteration {it}: best {best}; pool {pool}")
 
@@ -244,16 +265,42 @@ class League:
         self.step(f"it{it}:value", value)
         cand = self.s[f"candidate_it{it}"]
 
+        def policy():
+            files = [f for f in self.s["league_data"] if os.path.exists(f) and "pol_obs" in np.load(f).files]
+            out = os.path.join(cfg.dir, f"policy_it{it}.pt")
+            if files and not os.path.exists(out):
+                self.run(["-m", "bots.rl.policy_distill", "--init", best_policy, "--data", ",".join(files),
+                          "--out", out, "--threads", str(min(32, cfg.workers + 1))],
+                         log=os.path.join(cfg.dir, f"policy_it{it}.log"))
+            improved = os.path.exists(out) and json.loads(
+                open(os.path.join(cfg.dir, f"policy_it{it}.log")).read().strip().splitlines()[-1])["improved"]
+            self.s[f"cand_policy_it{it}"] = out if improved else best_policy
+            if files:
+                last = [json.loads(l) for l in open(os.path.join(cfg.dir, f"policy_it{it}.log"))
+                        if l.startswith('{"epoch"')][-1]
+                self.log(f"  policy on {len(files)} files with search targets: held-out KL "
+                         f"{last['held_init']['kl'] if 'held_init' in last else last['held']['kl']} -> "
+                         f"{last['held']['kl']}, top-move agreement -> {last['held']['agree']}"
+                         + ("" if improved else " (not improved: policy unchanged)"))
+        self.step(f"it{it}:policy", policy)
+        cand_policy = self.s.get(f"cand_policy_it{it}", best_policy)
+
         def gate():
-            res, m, lo, hi = self.h2h(f"gate_it{it}", agent(cfg, cand), agent(cfg, best), cfg.gate_games)
-            ok = m >= 1.0
-            self.log(f"  gate: candidate vs best, share x players {m:.3f} [{lo:.3f}, {hi:.3f}] "
-                     + " ".join(f"{n}p {v:.2f}" for n, v in res.items()) + (" -> ACCEPTED" if ok else " -> rejected"))
-            if ok:
-                self.s["pool"].append(best)
-                self.s["best"] = cand
-            self.s["history"].append({"iteration": it, "candidate": cand, "gate": round(m, 3),
-                                      "lo": round(lo, 3), "accepted": ok})
+            tries = [(cand_policy, cand)] + ([(best_policy, cand)] if cand_policy != best_policy else [])
+            ok = False
+            for pol, val in tries:
+                tag = "new policy + new value" if pol != best_policy else "new value"
+                res, m, lo, hi = self.h2h(f"gate_it{it}{'' if pol != best_policy or len(tries) == 1 else '_v'}",
+                                          agent(cfg, val, pol), agent(cfg, best, best_policy), cfg.gate_games)
+                ok = m >= 1.0
+                self.log(f"  gate ({tag}) vs best: share x players {m:.3f} [{lo:.3f}, {hi:.3f}] "
+                         + " ".join(f"{n}p {v:.2f}" for n, v in res.items()) + (" -> ACCEPTED" if ok else " -> rejected"))
+                self.s["history"].append({"iteration": it, "candidate": f"{pol}|{val}", "gate": round(m, 3),
+                                          "lo": round(lo, 3), "accepted": ok})
+                if ok:
+                    self.s["pool"].append(f"{best_policy}|{best}")
+                    self.s["best"], self.s["best_policy"] = val, pol
+                    break
         self.step(f"it{it}:gate", gate)
 
         def bench():
@@ -271,17 +318,18 @@ class League:
 
     def exploit(self, it):
         cfg, best = self.cfg, self.s["best"]
+        bp = self.s.get("best_policy", cfg.policy)
         x_value, files = best, []
         for j in range(1, cfg.exploit_steps + 1):
-            x = agent(cfg, x_value)
+            x = agent(cfg, x_value, bp)
             for n in COUNTS:                        # one exploiter seat on average, the rest the best
-                seats = [agent(cfg, best)] * (n - 1) + [x]
+                seats = [agent(cfg, best, bp)] * (n - 1) + [x]
                 f = os.path.join(cfg.dir, "data", f"exploit_it{it}_s{j}_p{n}.npz")
                 self.gen(f, n, cfg.exploit_games, seats, 9000 + 100 * it + 10 * j + n)
                 files.append(f)
             # fine-tune on games against the best only; the best's value net is the teacher
             x_value = self.train_value(f"exploit_it{it}_s{j}", list(files), len(files), init=x_value, teacher=best)
-        res, m, lo, hi = self.h2h(f"exploit_it{it}", agent(cfg, x_value), agent(cfg, best), cfg.gate_games)
+        res, m, lo, hi = self.h2h(f"exploit_it{it}", agent(cfg, x_value, bp), agent(cfg, best, bp), cfg.gate_games)
         found = lo > 1.0
         self.log(f"  exploiter vs best: share x players {m:.3f} [{lo:.3f}, {hi:.3f}] "
                  + " ".join(f"{n}p {v:.2f}" for n, v in res.items())
@@ -291,7 +339,7 @@ class League:
                                   "lo": round(lo, 3), "found": found})
         if found:
             self.s["league_data"] += [f for f in files if f not in self.s["league_data"]]
-            self.s["pool"].append(x_value)
+            self.s["pool"].append(f"{bp}|{x_value}")
 
 
 def main():

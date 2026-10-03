@@ -341,11 +341,13 @@ class SearchAgent(Agent):
         legal = state.legal_actions()
         root = self._reused_root(state)
         self._last, self._since, self._chosen = None, [], None
+        self.last_visits = None
         if len(legal) == 1:
             return legal[0]
         if not self.wants_search(state):
             return self._greedy(state)
         visits, amap = self.search(state, root)
+        self.last_visits, self.last_amap = visits, amap   # for recording search targets
         x = max(visits, key=visits.get)
         if self.reuse_tree:
             self._last, self._chosen = self._root.children.get(x), amap[x]

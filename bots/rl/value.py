@@ -45,7 +45,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import pgcore  # noqa: E402
 
 from ..heuristic import RANDOMIZED, STYLES, make  # noqa: E402
-from .features import Encoder  # noqa: E402
+from .features import AbstractActions, Encoder  # noqa: E402
 from .model import RLAgent, load, save  # noqa: E402
 
 CHECKPOINTS = ["runs/league3/champion.pt", "runs/exit2/best.pt", "runs/league_v2b/best.pt"] + \
@@ -78,6 +78,8 @@ def _gen(job):
     scripted = list(STYLES) + [RANDOMIZED]
     n = cfg.players
     obs, win, margin, game, rnd = [], [], [], [], []
+    acts = AbstractActions(rules)
+    pol_obs, pol_mask, pol_pi, pol_game = [], [], [], []     # search targets (visit distributions)
     for gid in seeds:
         rng = random.Random(gid)
         agents = []
@@ -96,10 +98,30 @@ def _gen(job):
         while not state.is_terminal():
             if state.is_chance_node():
                 outs = state.chance_outcomes()
-                state.apply_action(rng.choices([o for o, _ in outs], [p for _, p in outs])[0])
+                a = rng.choices([o for o, _ in outs], [p for _, p in outs])[0]
+                for ag in agents:
+                    ag.observe(state, pgcore.CHANCE, a)
+                state.apply_action(a)
                 continue
             snaps.append(state.clone())
-            state.apply_action(agents[state.current_player()].act(state))
+            seat = state.current_player()
+            a = agents[seat].act(state)
+            visits = getattr(agents[seat], "last_visits", None)
+            if visits:                                   # a search agent searched this decision
+                mask, _ = acts.mask_and_map(state.legal_actions())
+                pi = np.zeros(acts.n, np.float32)
+                total = sum(visits.values())
+                for x, c in visits.items():
+                    pi[x] = c / total
+                f = state.features(seat) if hasattr(state, "features") else \
+                    enc._encode(state, json.loads(state.to_json()), seat)
+                pol_obs.append(f.astype(np.float16))
+                pol_mask.append(mask)
+                pol_pi.append(pi)
+                pol_game.append(gid)
+            for ag in agents:                            # opponent modelling and tree reuse
+                ag.observe(state, seat, a)
+            state.apply_action(a)
         returns = state.returns()
         final = json.loads(state.to_json())["players"]
         score = [(p["powered"], p["money"]) for p in final]     # the engine's ranking
@@ -113,9 +135,13 @@ def _gen(job):
                 margin.append((score[seat][0] - rival[0] + tie) / MARGIN_SCALE)
                 game.append(gid)
                 rnd.append(v["round"])
-    return {"obs": np.stack(obs), "win": np.array(win, np.float32),
-            "margin": np.array(margin, np.float32), "game": np.array(game, np.int64),
-            "round": np.array(rnd, np.int16)}
+    out = {"obs": np.stack(obs), "win": np.array(win, np.float32),
+           "margin": np.array(margin, np.float32), "game": np.array(game, np.int64),
+           "round": np.array(rnd, np.int16)}
+    if pol_obs:
+        out.update(pol_obs=np.stack(pol_obs), pol_mask=np.stack(pol_mask), pol_pi=np.stack(pol_pi),
+                   pol_game=np.array(pol_game, np.int64))
+    return out
 
 
 def gen(cfg: GenConfig):
@@ -125,7 +151,8 @@ def gen(cfg: GenConfig):
     chunks = [ids[i::cfg.workers * 8] for i in range(cfg.workers * 8)]
     with mp.get_context("spawn").Pool(cfg.workers) as pool:
         parts = pool.map(_gen, [(cfg, c) for c in chunks if c])
-    data = {k: np.concatenate([p[k] for p in parts]) for k in parts[0]}
+    keys = dict.fromkeys(k for p in parts for k in p)          # policy targets only from search agents
+    data = {k: np.concatenate([p[k] for p in parts if k in p]) for k in keys}
     np.savez(cfg.out, players=cfg.players, **data)
     print(f"{cfg.games} games, {len(data['win'])} samples, {time.time() - t0:.0f}s -> {cfg.out}")
 
