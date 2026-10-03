@@ -35,6 +35,10 @@ Each iteration:
     training data and it joins the pool, so the next value network learns to
     handle those lines.
 
+While an iteration trains and gates, the next iteration's games are generated
+meanwhile on --pipe-workers (from the best at that time: one iteration stale
+if the gate accepts, as AlphaZero-style pipelines are).
+
 Everything is resumable: state.json records what is done, data comes in
 chunk files, ladders and head-to-heads log every game.
 """
@@ -61,6 +65,7 @@ SCRIPTED = ("builder", "balanced", "randomized")
 class Config:
     dir: str = "runs/sleague"
     workers: int = 24
+    pipe_workers: int = 16         # generate the next iteration's games meanwhile on this many (0: off)
     policy: str = "runs/exit5/best.pt"
     value: str = "runs/value5/mlp_l0.5.pt"
     options: str = "100+norm+c3+np+om+reuse+fuel"      # the product agent: gate, ladder
@@ -153,11 +158,17 @@ class League:
             raise RuntimeError(f"failed ({r.returncode}): {' '.join(args[:4])} ... (see {log})")
 
     # ---- pieces -----------------------------------------------------------
-    def gen(self, out, players, games, agents, seed):
+    def fg_workers(self):
+        """Workers for foreground steps: fewer while the next games are generated meanwhile."""
+        t = getattr(self, "_pipe", None)
+        busy = t is not None and t.is_alive()
+        return max(4, self.cfg.workers - self.cfg.pipe_workers) if busy else self.cfg.workers
+
+    def gen(self, out, players, games, agents, seed, workers=None):
         if os.path.exists(out):
             return
         self.run(["-m", "bots.rl.value", "gen", "--out", out + ".tmp.npz", "--players", str(players),
-                  "--games", str(games), "--workers", str(self.cfg.workers), "--seed", str(seed),
+                  "--games", str(games), "--workers", str(workers or self.fg_workers()), "--seed", str(seed),
                   "--agents", ",".join(agents)], log=out + ".log")
         os.replace(out + ".tmp.npz", out)
 
@@ -170,7 +181,7 @@ class League:
             res, pooled = {}, []
             for n in COUNTS:
                 log = os.path.join(self.cfg.dir, f"h2h_{name}_p{n}.jsonl")
-                self.run(["-m", "bots.headtohead", new, str(n), str(k), log, str(self.cfg.workers), old],
+                self.run(["-m", "bots.headtohead", new, str(n), str(k), log, str(self.fg_workers()), old],
                          log=log[:-6] + ".out")
                 r = [json.loads(l)["r"] * n for l in open(log) if l.startswith("{")]
                 res[n] = sum(r) / len(r)
@@ -201,12 +212,12 @@ class League:
         groups = ";".join(",".join(g) for g in (groups or [[s] for s in sources]))
         self.run(["-m", "bots.rl.value_td", "prep", "--dir", d, "--sources", ",".join(sources),
                   "--split-groups", groups], log=log)
-        common = ["--dir", d, "--search-eval", ev, "--threads", str(self.cfg.workers)]
+        common = ["--dir", d, "--search-eval", ev, "--threads", str(self.fg_workers())]
         if teacher:
             self.run(["-m", "bots.rl.value_td", "targets", "--dir", d, "--lam", "0.5", "--teacher", teacher],
                      log=log)
         else:
-            half = str(max(1, self.cfg.workers // 2))
+            half = str(max(1, self.fg_workers() // 2))
             procs = [subprocess.Popen([PY, "-m", "bots.rl.value_td", "train", *common[:4], "--threads", half,
                                        "--name", f"teach{k}", "--fold", str(k), "--arch", "mlp", "--epochs", "2"],
                                       stdout=open(log, "a"), stderr=subprocess.STDOUT) for k in (0, 1)]
@@ -263,7 +274,7 @@ class League:
             log = os.path.join(self.cfg.dir, f"ladder_it{it}_p{n}.jsonl")
             out = os.path.join(self.cfg.dir, f"ladder_it{it}_p{n}.json")
             self.run(["-m", "bots.rating", "--no-scripted", "--agents", ",".join(agents), "--players", str(n),
-                      "--games", str(self.cfg.ladder_games), "--procs", str(self.cfg.workers),
+                      "--games", str(self.cfg.ladder_games), "--procs", str(self.fg_workers()),
                       "--seed", str(100 * it + n), "--games-log", log, "--out", out], log=out[:-5] + ".out")
             rows[n] = {r["agent"]: (round(r["elo"]), round(r["lo"]), round(r["hi"])) for r in json.load(open(out))["rows"]}
         return rows
@@ -282,6 +293,8 @@ class League:
         self.log(f"iteration {it}: best {best}; pool {pool}")
 
         def data():
+            if getattr(self, "_pipe", None) is not None:
+                self._pipe.join()                 # games generated meanwhile last iteration
             for n in COUNTS:
                 f = os.path.join(cfg.dir, "data", f"league_it{it}_p{n}.npz")
                 os.makedirs(os.path.dirname(f), exist_ok=True)
@@ -291,6 +304,19 @@ class League:
                     self.save()
             self.log(f"  league games: {cfg.games_per_count} per count ({len(self.s['league_data'])} league files)")
         self.step(f"it{it}:data", data)
+        if cfg.pipe_workers:                      # the next iteration's games, generated meanwhile
+            import threading
+            nxt = it + 1
+
+            def pipe():
+                for n in COUNTS:
+                    f = os.path.join(cfg.dir, "data", f"league_it{nxt}_p{n}.npz")
+                    try:
+                        self.gen(f, n, cfg.games_per_count, seats, 7000 + 100 * nxt + n, workers=cfg.pipe_workers)
+                    except Exception as e:        # the next data step regenerates what is missing
+                        self.log(f"  (meanwhile generation of {os.path.basename(f)} failed: {e})")
+            self._pipe = threading.Thread(target=pipe, daemon=True)
+            self._pipe.start()
 
         def value():
             base, groups = self.base()
@@ -313,17 +339,17 @@ class League:
             out = os.path.join(cfg.dir, f"policy_it{it}.pt")
             if files and not os.path.exists(out):
                 self.run(["-m", "bots.rl.policy_distill", "--init", best_policy, "--data", ",".join(files),
-                          "--out", out, "--threads", str(min(32, cfg.workers + 1))],
+                          "--out", out, "--threads", str(min(32, self.fg_workers() + 1))],
                          log=os.path.join(cfg.dir, f"policy_it{it}.log"))
             improved = os.path.exists(out) and json.loads(
                 open(os.path.join(cfg.dir, f"policy_it{it}.log")).read().strip().splitlines()[-1])["improved"]
             self.s[f"cand_policy_it{it}"] = out if improved else best_policy
             if files:
-                last = [json.loads(l) for l in open(os.path.join(cfg.dir, f"policy_it{it}.log"))
-                        if l.startswith('{"epoch"')][-1]
-                self.log(f"  policy on {len(files)} files with search targets: held-out KL "
-                         f"{last['held_init']['kl'] if 'held_init' in last else last['held']['kl']} -> "
-                         f"{last['held']['kl']}, top-move agreement -> {last['held']['agree']}"
+                epochs = [json.loads(l) for l in open(os.path.join(cfg.dir, f"policy_it{it}.log"))
+                          if l.startswith('{"epoch"')]
+                init, best_ep = epochs[0]["held"], min(epochs, key=lambda e: e["held"]["kl"])["held"]
+                self.log(f"  policy on {len(files)} files with search targets: held-out KL {init['kl']} -> "
+                         f"{best_ep['kl']}, top-move agreement {init['agree']} -> {best_ep['agree']}"
                          + ("" if improved else " (not improved: policy unchanged)"))
         self.step(f"it{it}:policy", policy)
         cand_policy = self.s.get(f"cand_policy_it{it}", best_policy)
