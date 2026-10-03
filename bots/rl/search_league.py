@@ -84,6 +84,8 @@ class Config:
     finetune_epochs: int = 2
     gate_games: int = 150          # per player count, at most (sequential: stops once the result is clear)
     gate_step: int = 50            # games per count added per round of the sequential gate
+    gate_mode: str = "league"      # league: rate candidates with the best and pool; h2h: vs the best only
+    gate_ladder_games: int = 200   # league gate: tables per player count
     ladder_games: int = 300        # per player count
     ladder_every: int = 3          # run the benchmark ladder every k iterations
     exploit_every: int = 3
@@ -358,6 +360,43 @@ class League:
         cand_policy = self.s.get(f"cand_policy_it{it}", best_policy)
 
         def gate():
+            if cfg.gate_mode == "h2h":
+                return h2h_gate()
+            # league gate: candidates, the best and recent pool agents rated together in mixed
+            # tables at every count; the highest mean Elo becomes the best (robust to the
+            # non-transitivity exploiters bring, unlike a head-to-head against the best alone)
+            best_spec = f"{best_policy}|{best}"
+            cands = [f"{cand_policy}|{cand}"] + ([f"{best_policy}|{cand}"] if cand_policy != best_policy else [])
+            specs = list(dict.fromkeys(cands + [best_spec] + self.s["pool"][-3:]))
+            agents = [agent_of(cfg, x) for x in specs]
+            extra = ["mcts:100+norm+c3:runs/exit5/best.pt:runs/value4/mlp_l0.5.pt",
+                     "mcts:100+norm+c3:runs/exit3/best.pt:runs/value1/big_aux05.pt"]
+            agents += [a for a in extra if a not in agents][:max(0, max(COUNTS) - len(agents))]
+            elo = {x: [] for x in specs}
+            for n in COUNTS:
+                log = os.path.join(cfg.dir, f"gate_it{it}_p{n}.jsonl")
+                out = os.path.join(cfg.dir, f"gate_it{it}_p{n}.json")
+                self.run(["-m", "bots.rating", "--no-scripted", "--agents", ",".join(agents), "--players", str(n),
+                          "--games", str(cfg.gate_ladder_games), "--procs", str(self.fg_workers()),
+                          "--seed", str(5000 + 100 * it + n), "--games-log", log, "--out", out],
+                         log=out[:-5] + ".out")
+                rows = {r["agent"]: r["elo"] for r in json.load(open(out))["rows"]}
+                for x in specs:
+                    elo[x].append(rows[agent_of(cfg, x)])
+            mean = {x: sum(v) / len(v) for x, v in elo.items()}
+            top = max([best_spec] + cands, key=mean.get)
+            ok = top != best_spec
+            self.log("  gate (league, mean Elo over 3-6p): " + "; ".join(
+                f"{label(agent_of(cfg, x))}{' (best)' if x == best_spec else ' (cand)' if x in cands else ''} "
+                f"{mean[x]:.0f}" for x in sorted(specs, key=mean.get, reverse=True))
+                + (f" -> ACCEPTED {label(agent_of(cfg, top))}" if ok else " -> best kept"))
+            self.s["history"].append({"iteration": it, "gate": "league", "mean_elo": {x: round(m) for x, m in mean.items()},
+                                      "accepted": ok, "new_best": top})
+            if ok:
+                self.s["pool"].append(best_spec)
+                self.s["best_policy"], self.s["best"] = split_spec(top, cfg.policy)
+
+        def h2h_gate():
             tries = [(cand_policy, cand)] + ([(best_policy, cand)] if cand_policy != best_policy else [])
             ok = False
             for pol, val in tries:
