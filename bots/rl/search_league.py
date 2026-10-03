@@ -63,7 +63,8 @@ class Config:
     workers: int = 24
     policy: str = "runs/exit5/best.pt"
     value: str = "runs/value5/mlp_l0.5.pt"
-    options: str = "100+norm+c3+np+om+reuse+fuel"
+    options: str = "100+norm+c3+np+om+reuse+fuel"      # the product agent: gate, ladder
+    data_options: str = "100+norm+c3+np+om+reuse+fuel+pcr25"   # training games: playout cap randomization
     pool: str = "runs/value4/mlp_l0.5.pt,runs/value3/mlp_l0.5.pt"  # starting pool (value nets)
     base_from: str = "runs/value5" # always train on this value_td dir's sources, with its split groups
     seed_data: str = ""            # earlier search games to add to the league data
@@ -106,8 +107,8 @@ def agent_of(cfg, spec):
     return agent(cfg, value, policy)
 
 
-def agent(cfg, value, policy=None):
-    return f"mcts:{cfg.options}:{policy or cfg.policy}:{value}"
+def agent(cfg, value, policy=None, data=False):
+    return f"mcts:{cfg.data_options if data else cfg.options}:{policy or cfg.policy}:{value}"
 
 
 class League:
@@ -275,8 +276,8 @@ class League:
         best = self.s["best"]
         best_policy = self.s.get("best_policy", cfg.policy)
         pool = self.s["pool"][-cfg.pool_size:]
-        seats = [agent(cfg, best, best_policy)] * cfg.w_best \
-            + [agent_of(cfg, v) for v in pool for _ in range(cfg.w_pool)] \
+        seats = [agent(cfg, best, best_policy, data=True)] * cfg.w_best \
+            + [agent(cfg, *split_spec(v, cfg.policy)[::-1], data=True) for v in pool for _ in range(cfg.w_pool)] \
             + [s for s in SCRIPTED for _ in range(cfg.w_scripted)]
         self.log(f"iteration {it}: best {best}; pool {pool}")
 
@@ -365,9 +366,9 @@ class League:
         bp = self.s.get("best_policy", cfg.policy)
         x_value, files = best, []
         for j in range(1, cfg.exploit_steps + 1):
-            x = agent(cfg, x_value, bp)
+            x = agent(cfg, x_value, bp, data=True)
             for n in COUNTS:                        # one exploiter seat on average, the rest the best
-                seats = [agent(cfg, best, bp)] * (n - 1) + [x]
+                seats = [agent(cfg, best, bp, data=True)] * (n - 1) + [x]
                 f = os.path.join(cfg.dir, "data", f"exploit_it{it}_s{j}_p{n}.npz")
                 self.gen(f, n, cfg.exploit_games, seats, 9000 + 100 * it + 10 * j + n)
                 files.append(f)

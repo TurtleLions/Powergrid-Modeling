@@ -33,6 +33,9 @@ The value network may differ by player count: "...:policy.pt:a.pt@4|b.pt" uses
 a.pt in 4-player games and b.pt otherwise.
   np     NumPy forward passes for MLP networks (same values up to float
          rounding; avoids PyTorch's per-call overhead).
+  pcrK   playout cap randomization (KataGo), for generating training games:
+         a random 75% of decisions use only K simulations and are not
+         recorded as policy targets; the rest use the full count.
 """
 from __future__ import annotations
 
@@ -184,7 +187,8 @@ class SearchAgent(Agent):
                  phases=SEARCH_PHASES, net=None, root_noise: float = 0.0,
                  noise_alpha: float = 0.3, value_path: str = "", value_net=None,
                  normalize_q: bool = False, batch: int = 1, search_fuel: bool = False,
-                 reuse_tree: bool = False, opponent_model: bool = False, numpy_forward: bool = False):
+                 reuse_tree: bool = False, opponent_model: bool = False, numpy_forward: bool = False,
+                 fast_sims: int = 0, full_prob: float = 0.25):
         """root_noise > 0 mixes Dirichlet(noise_alpha) noise into the root prior
         (for exploration when generating training data; 0 for normal play).
         value_path / value_net: score leaves with this value network instead
@@ -225,6 +229,7 @@ class SearchAgent(Agent):
         self.root_noise = root_noise
         self.noise_alpha = noise_alpha
         self.batch = max(1, batch)
+        self.fast_sims, self.full_prob = fast_sims, full_prob
         self._fast_cache = {}
         self.fast = self._make_fast()
         self.name = f"mcts{sims}"
@@ -346,8 +351,14 @@ class SearchAgent(Agent):
             return legal[0]
         if not self.wants_search(state):
             return self._greedy(state)
-        visits, amap = self.search(state, root)
-        self.last_visits, self.last_amap = visits, amap   # for recording search targets
+        full = not self.fast_sims or self.rng.random() < self.full_prob
+        sims, self.sims = self.sims, (self.sims if full else self.fast_sims)
+        try:
+            visits, amap = self.search(state, root)
+        finally:
+            self.sims = sims
+        if full:                                          # only full searches are training targets
+            self.last_visits, self.last_amap = visits, amap
         x = max(visits, key=visits.get)
         if self.reuse_tree:
             self._last, self._chosen = self._root.children.get(x), amap[x]

@@ -319,5 +319,6 @@ def make(name: str) -> Agent:
                            normalize_q="norm" in opts, c_puct=c_puct[0] if c_puct else 1.5,
                            batch=batch[0] if batch else 1, search_fuel="fuel" in opts,
                            reuse_tree="reuse" in opts, opponent_model="om" in opts,
-                           numpy_forward="np" in opts)
+                           numpy_forward="np" in opts,
+                           fast_sims=next((int(o[3:]) for o in opts if o.startswith("pcr")), 0))
     return HeuristicAgent(name)
