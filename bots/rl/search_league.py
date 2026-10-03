@@ -25,6 +25,8 @@ Each iteration:
     + new value. The old best joins the pool.
  5. Benchmark: an Elo ladder (bots/rating.py) per player count over the best,
     the pool and anchors. The scripted worst case is a floor, not the metric.
+    If a pool agent's mean Elo over the counts beats the best's by
+    --promote-margin, it becomes the best (checked before the next iteration).
  6. Every --exploit-every iterations, an exploiter: a value network fine-tuned
     only on games against the frozen best (one exploiter seat, the rest the
     best), twice in a row, so its search learns what wins against that
@@ -79,6 +81,7 @@ class Config:
     exploit_every: int = 2
     exploit_games: int = 300       # per player count per exploiter step
     exploit_steps: int = 2
+    promote_margin: float = 30.0   # ladder: another agent this much above the best (mean Elo) becomes best
     iterations: int = 100
 
 
@@ -209,6 +212,34 @@ class League:
         self.run(args, log=log)
         return ck
 
+    def promote(self, it):
+        """After a ladder: if a pool agent's mean Elo over the player counts beats the best's by
+        --promote-margin, it becomes the best (e.g. an exploiter that is simply stronger)."""
+        key = f"it{it}:promote"
+        if key in self.s["done"]:
+            return
+        specs = [self.best_spec()] + self.s["pool"][-4:]
+        means = {}
+        for spec in dict.fromkeys(specs):
+            name = agent_of(self.cfg, spec)
+            elos = []
+            for n in COUNTS:
+                f = os.path.join(self.cfg.dir, f"ladder_it{it}_p{n}.json")
+                if os.path.exists(f):
+                    elos += [r["elo"] for r in json.load(open(f))["rows"] if r["agent"] == name]
+            if elos:
+                means[spec] = sum(elos) / len(elos)
+        best = self.best_spec()
+        if best in means:
+            top = max(means, key=means.get)
+            if top != best and means[top] - means[best] >= self.cfg.promote_margin:
+                self.log(f"  promotion: {label(agent_of(self.cfg, top))} mean Elo {means[top]:.0f} vs best "
+                         f"{means[best]:.0f} -> becomes the best")
+                self.s["pool"] = [p for p in self.s["pool"] if p != top] + [best]
+                self.s["best_policy"], self.s["best"] = split_spec(top, self.cfg.policy)
+        self.s["done"].append(key)
+        self.save()
+
     def ladder(self, it):
         agents = [agent_of(self.cfg, self.best_spec())] + [agent_of(self.cfg, v) for v in self.s["pool"][-4:]] \
             + ["mcts:100+norm+c3:runs/exit5/best.pt:runs/value4/mlp_l0.5.pt",   # 2026-10-01's agent
@@ -230,6 +261,8 @@ class League:
     # ---- one iteration ------------------------------------------------------
     def iterate(self):
         cfg, it = self.cfg, self.s["iteration"] + 1
+        if self.s["iteration"]:
+            self.promote(self.s["iteration"])     # from the last ladder (also on resume)
         best = self.s["best"]
         best_policy = self.s.get("best_policy", cfg.policy)
         pool = self.s["pool"][-cfg.pool_size:]
