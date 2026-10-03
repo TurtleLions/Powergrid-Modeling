@@ -11,8 +11,11 @@ Each iteration:
     (--w-best), past bests in the pool (--w-pool), scripted styles
     (--w-scripted; kept for robustness, not as the target). Data is labelled
     as in bots/rl/value.py gen.
- 2. A new value network (bots/rl/value_td.py: out-of-fold teachers, TD(lambda)
-    targets) on all data so far, league games oversampled (--oversample).
+ 2. A new value network: by default (--finetune 1) the best value net fine-tuned
+    on all league games plus the earlier searched-game data (whole split groups,
+    so their held-out games stay unseen), TD(lambda) targets from the best net
+    (it never saw the new games); league games oversampled (--oversample).
+    --finetune 0 retrains from scratch on everything (out-of-fold teachers).
  3. Gate: 1 x candidate vs (n-1) x best at every player count; accepted if its
     share x players, pooled over counts, is at least 1 (a fair share). The old
     best then joins the pool.
@@ -63,6 +66,8 @@ class Config:
     w_scripted: int = 1            # per scripted style
     oversample: int = 3
     epochs: int = 4
+    finetune: int = 1              # 1: fine-tune the best value net on league games + searched-game replay
+    finetune_epochs: int = 2
     gate_games: int = 150          # per player count
     ladder_games: int = 400        # per player count
     exploit_every: int = 2
@@ -177,7 +182,7 @@ class League:
                 raise RuntimeError(f"teachers failed (see {log})")
             self.run(["-m", "bots.rl.value_td", "targets", "--dir", d, "--lam", "0.5"], log=log)
         args = ["-m", "bots.rl.value_td", "train", *common, "--name", "value", "--target", "target_l0.5.npy",
-                "--arch", "mlp", "--epochs", str(self.cfg.epochs if not init else 2)]
+                "--arch", "mlp", "--epochs", str(self.cfg.epochs if not init else self.cfg.finetune_epochs)]
         if self.cfg.oversample > 1 and oversample_from < len(sources):
             args += ["--oversample", str(self.cfg.oversample), "--oversample-from", str(oversample_from)]
         if init:
@@ -226,8 +231,15 @@ class League:
         def value():
             base, groups = self.base()
             league = self.s["league_data"]
-            ck = self.train_value(f"value_it{it}", base + league, len(base),
-                                  groups=groups + [[f] for f in league])
+            if cfg.finetune:
+                # replay only the searched-game groups (whole groups: their held-out games stay unseen)
+                groups = [g for g in groups if all("searched" in f for f in g)]
+                base = [f for g in groups for f in g]
+                ck = self.train_value(f"value_it{it}", base + league, len(base), init=best, teacher=best,
+                                      groups=groups + [[f] for f in league])
+            else:
+                ck = self.train_value(f"value_it{it}", base + league, len(base),
+                                      groups=groups + [[f] for f in league])
             self.s[f"candidate_it{it}"] = ck
         self.step(f"it{it}:value", value)
         cand = self.s[f"candidate_it{it}"]
