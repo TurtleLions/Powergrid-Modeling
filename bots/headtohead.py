@@ -1,6 +1,7 @@
 """One seat of an agent against (n-1) copies of each opponent, at any player count.
 
     python3 -m bots.headtohead FOCUS PLAYERS GAMES LOG PROCS [OPPONENTS]
+    python3 -m bots.headtohead --multi SPEC.json PROCS   # several at once in one pool
 
 OPPONENTS is comma-separated (default: every scripted style). Every game is
 appended to LOG (JSONL) as it finishes, so a rerun resumes; the summary gives
@@ -61,7 +62,36 @@ def run(focus, players, games, log, procs, opponents=None):
     return res, rounds
 
 
+def run_many(specs, procs):
+    """Several head-to-heads in one pool (keeps every worker busy across player counts).
+    specs: [(focus, players, games per opponent, log, opponents or None)]."""
+    from .evaluate import DEFAULT_OPPONENTS
+    jobs, files = [], {}
+    for focus, players, games, log, opponents in specs:
+        done = set()
+        if os.path.exists(log):
+            for line in open(log):
+                try:
+                    g = json.loads(line)
+                    done.add((g["opp"], g["seed"]))
+                except json.JSONDecodeError:
+                    pass
+        files[log] = open(log, "a")
+        jobs += [((focus, o, players, 1000 * i + k), log) for i, o in enumerate(opponents or DEFAULT_OPPONENTS)
+                 for k in range(games) if (o, 1000 * i + k) not in done]
+    if jobs:
+        with mp.get_context("spawn").Pool(procs) as pool:
+            for (opp, seed, r, rounds), log in zip(pool.imap(_job, [j for j, _ in jobs]), [l for _, l in jobs]):
+                files[log].write(json.dumps({"opp": opp, "seed": seed, "r": r, "rounds": rounds}) + "\n")
+                files[log].flush()
+    for f in files.values():
+        f.close()
+
+
 def main():
+    if sys.argv[1] == "--multi":                     # --multi SPEC.json PROCS
+        run_many([tuple(x) for x in json.load(open(sys.argv[2]))], int(sys.argv[3]))
+        return
     focus, players, games, log, procs = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4], int(sys.argv[5])
     opponents = sys.argv[6].split(",") if len(sys.argv) > 6 else None
     res, rounds = run(focus, players, games, log, procs, opponents)

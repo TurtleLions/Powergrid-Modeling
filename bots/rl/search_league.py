@@ -82,7 +82,7 @@ class Config:
     epochs: int = 4
     finetune: int = 1              # 1: fine-tune the best value net on league games + searched-game replay
     finetune_epochs: int = 2
-    gate_games: int = 200          # per player count, at most (sequential: stops once the result is clear)
+    gate_games: int = 150          # per player count, at most (sequential: stops once the result is clear)
     gate_step: int = 50            # games per count added per round of the sequential gate
     ladder_games: int = 300        # per player count
     ladder_every: int = 3          # run the benchmark ladder every k iterations
@@ -179,10 +179,13 @@ class League:
         k = min(step or games, games)
         while True:
             res, pooled = {}, []
+            logs = {n: os.path.join(self.cfg.dir, f"h2h_{name}_p{n}.jsonl") for n in COUNTS}
+            spec = os.path.join(self.cfg.dir, f"h2h_{name}.spec.json")
+            json.dump([[new, n, k, logs[n], [old]] for n in COUNTS], open(spec, "w"))
+            self.run(["-m", "bots.headtohead", "--multi", spec, str(self.fg_workers())],
+                     log=os.path.join(self.cfg.dir, f"h2h_{name}.out"))
             for n in COUNTS:
-                log = os.path.join(self.cfg.dir, f"h2h_{name}_p{n}.jsonl")
-                self.run(["-m", "bots.headtohead", new, str(n), str(k), log, str(self.fg_workers()), old],
-                         log=log[:-6] + ".out")
+                log = logs[n]
                 r = [json.loads(l)["r"] * n for l in open(log) if l.startswith("{")]
                 res[n] = sum(r) / len(r)
                 pooled += r
