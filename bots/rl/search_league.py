@@ -67,7 +67,7 @@ class Config:
     pool: str = "runs/value4/mlp_l0.5.pt,runs/value3/mlp_l0.5.pt"  # starting pool (value nets)
     base_from: str = "runs/value5" # always train on this value_td dir's sources, with its split groups
     seed_data: str = ""            # earlier search games to add to the league data
-    games_per_count: int = 500     # league games per player count per iteration
+    games_per_count: int = 200     # league games per player count per iteration (small, frequent updates)
     w_best: int = 12
     w_pool: int = 2                # per pool member (at most --pool-size most recent)
     pool_size: int = 3
@@ -76,10 +76,12 @@ class Config:
     epochs: int = 4
     finetune: int = 1              # 1: fine-tune the best value net on league games + searched-game replay
     finetune_epochs: int = 2
-    gate_games: int = 150          # per player count
-    ladder_games: int = 400        # per player count
-    exploit_every: int = 2
-    exploit_games: int = 300       # per player count per exploiter step
+    gate_games: int = 200          # per player count, at most (sequential: stops once the result is clear)
+    gate_step: int = 50            # games per count added per round of the sequential gate
+    ladder_games: int = 300        # per player count
+    ladder_every: int = 3          # run the benchmark ladder every k iterations
+    exploit_every: int = 3
+    exploit_games: int = 150       # per player count per exploiter step
     exploit_steps: int = 2
     promote_margin: float = 30.0   # ladder: another agent this much above the best (mean Elo) becomes best
     iterations: int = 100
@@ -158,19 +160,26 @@ class League:
                   "--agents", ",".join(agents)], log=out + ".log")
         os.replace(out + ".tmp.npz", out)
 
-    def h2h(self, name, new, old, games):
-        """share x players of 1 x new vs (n-1) x old, per count and pooled."""
-        res, pooled = {}, []
-        for n in COUNTS:
-            log = os.path.join(self.cfg.dir, f"h2h_{name}_p{n}.jsonl")
-            self.run(["-m", "bots.headtohead", new, str(n), str(games), log, str(self.cfg.workers), old],
-                     log=log[:-6] + ".out")
-            r = [json.loads(l)["r"] * n for l in open(log) if l.startswith("{")]
-            res[n] = sum(r) / len(r)
-            pooled += r
-        m = sum(pooled) / len(pooled)
-        sd = math.sqrt(max(sum(x * x for x in pooled) / len(pooled) - m * m, 0) / len(pooled))
-        return res, m, m - 1.96 * sd, m + 1.96 * sd
+    def h2h(self, name, new, old, games, step=None):
+        """share x players of 1 x new vs (n-1) x old, per count and pooled. With `step`,
+        sequential: games are added `step` per count at a time (the logs resume) until the
+        pooled 95% interval excludes 1.0 or `games` per count are played."""
+        k = min(step or games, games)
+        while True:
+            res, pooled = {}, []
+            for n in COUNTS:
+                log = os.path.join(self.cfg.dir, f"h2h_{name}_p{n}.jsonl")
+                self.run(["-m", "bots.headtohead", new, str(n), str(k), log, str(self.cfg.workers), old],
+                         log=log[:-6] + ".out")
+                r = [json.loads(l)["r"] * n for l in open(log) if l.startswith("{")]
+                res[n] = sum(r) / len(r)
+                pooled += r
+            m = sum(pooled) / len(pooled)
+            sd = math.sqrt(max(sum(x * x for x in pooled) / len(pooled) - m * m, 0) / len(pooled))
+            lo, hi = m - 1.96 * sd, m + 1.96 * sd
+            if k >= games or lo > 1.0 or hi < 1.0:
+                return res, m, lo, hi
+            k = min(k + step, games)
 
     def base(self):
         """(sources, split groups) of --base-from: training on them with the same groups keeps
@@ -324,7 +333,8 @@ class League:
             for pol, val in tries:
                 tag = "new policy + new value" if pol != best_policy else "new value"
                 res, m, lo, hi = self.h2h(f"gate_it{it}{'' if pol != best_policy or len(tries) == 1 else '_v'}",
-                                          agent(cfg, val, pol), agent(cfg, best, best_policy), cfg.gate_games)
+                                          agent(cfg, val, pol), agent(cfg, best, best_policy), cfg.gate_games,
+                                          step=cfg.gate_step)
                 ok = m >= 1.0
                 self.log(f"  gate ({tag}) vs best: share x players {m:.3f} [{lo:.3f}, {hi:.3f}] "
                          + " ".join(f"{n}p {v:.2f}" for n, v in res.items()) + (" -> ACCEPTED" if ok else " -> rejected"))
@@ -342,7 +352,8 @@ class League:
                 self.log(f"  ladder {n}p: " + "; ".join(f"{label(a)} "
                                                       f"{e[0]} [{e[1]},{e[2]}]" for a, e in
                                                       sorted(r.items(), key=lambda kv: -kv[1][0])))
-        self.step(f"it{it}:ladder", bench)
+        if cfg.ladder_every and it % cfg.ladder_every == 0:
+            self.step(f"it{it}:ladder", bench)
 
         if cfg.exploit_every and it % cfg.exploit_every == 0:
             self.step(f"it{it}:exploit", lambda: self.exploit(it))
@@ -362,7 +373,8 @@ class League:
                 files.append(f)
             # fine-tune on games against the best only; the best's value net is the teacher
             x_value = self.train_value(f"exploit_it{it}_s{j}", list(files), len(files), init=x_value, teacher=best)
-        res, m, lo, hi = self.h2h(f"exploit_it{it}", agent(cfg, x_value, bp), agent(cfg, best, bp), cfg.gate_games)
+        res, m, lo, hi = self.h2h(f"exploit_it{it}", agent(cfg, x_value, bp), agent(cfg, best, bp), cfg.gate_games,
+                                  step=cfg.gate_step)
         found = lo > 1.0
         self.log(f"  exploiter vs best: share x players {m:.3f} [{lo:.3f}, {hi:.3f}] "
                  + " ".join(f"{n}p {v:.2f}" for n, v in res.items())
