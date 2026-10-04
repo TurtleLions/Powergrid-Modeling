@@ -86,6 +86,8 @@ class Config:
     gate_step: int = 50            # games per count added per round of the sequential gate
     gate_mode: str = "league"      # league: rate candidates with the best and pool; h2h: vs the best only
     gate_ladder_games: int = 200   # league gate: tables per player count
+    pool_margin: float = 20.0      # league gate: a pool agent must beat the best by this much (mean Elo)
+    window: int = 24               # value fine-tune: the most recent league files only (0: all + old replay)
     ladder_games: int = 300        # per player count
     ladder_every: int = 3          # run the benchmark ladder every k iterations
     exploit_every: int = 3
@@ -326,7 +328,13 @@ class League:
         def value():
             base, groups = self.base()
             league = self.s["league_data"]
-            if cfg.finetune:
+            if cfg.finetune and cfg.window:
+                # recent strong games only: older, weaker games diluted what the exploiters
+                # (fine-tuned on recent games against the best) learned better
+                recent = league[-cfg.window:]
+                ck = self.train_value(f"value_it{it}", recent, len(recent), init=best, teacher=best,
+                                      groups=[[f] for f in recent])
+            elif cfg.finetune:
                 # replay only the searched-game groups (whole groups: their held-out games stay unseen)
                 groups = [g for g in groups if all("searched" in f for f in g)]
                 base = [f for g in groups for f in g]
@@ -384,7 +392,11 @@ class League:
                 for x in specs:
                     elo[x].append(rows[agent_of(cfg, x)])
             mean = {x: sum(v) / len(v) for x, v in elo.items()}
-            top = max([best_spec] + cands, key=mean.get)
+            # any rated agent can become the best: candidates by beating it, pool agents (e.g. an
+            # exploiter that is simply stronger) by --pool-margin, so noise does not flip-flop it
+            eligible = [x for x in specs if x == best_spec or x in cands
+                        or mean[x] - mean[best_spec] >= cfg.pool_margin]
+            top = max(eligible, key=mean.get)
             ok = top != best_spec
             self.log("  gate (league, mean Elo over 3-6p): " + "; ".join(
                 f"{label(agent_of(cfg, x))}{' (best)' if x == best_spec else ' (cand)' if x in cands else ''} "
@@ -393,7 +405,7 @@ class League:
             self.s["history"].append({"iteration": it, "gate": "league", "mean_elo": {x: round(m) for x, m in mean.items()},
                                       "accepted": ok, "new_best": top})
             if ok:
-                self.s["pool"].append(best_spec)
+                self.s["pool"] = [p for p in self.s["pool"] if p != top] + [best_spec]
                 self.s["best_policy"], self.s["best"] = split_spec(top, cfg.policy)
 
         def h2h_gate():
