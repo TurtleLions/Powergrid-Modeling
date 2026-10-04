@@ -435,6 +435,7 @@ class League:
                                                       sorted(r.items(), key=lambda kv: -kv[1][0])))
         if cfg.ladder_every and it % cfg.ladder_every == 0:
             self.step(f"it{it}:ladder", bench)
+            self.promote(it)                      # before the exploiter round: attack the true best
 
         if cfg.exploit_every and it % cfg.exploit_every == 0:
             self.step(f"it{it}:exploit", lambda: self.exploit(it))
