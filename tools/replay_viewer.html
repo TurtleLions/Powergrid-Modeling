@@ -1,0 +1,883 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Power Grid Replay</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Saira+Condensed:wght@500;600;700&family=Source+Sans+3:wght@400;600&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: control-room console. Map is the hero on the left; the move, the model's view and
+   the players stack on the right; markets and the win-share trace run underneath. */
+:root {
+  --bg: #eef2f1;
+  --panel: #fbfcfc;
+  --ink: #17211f;
+  --muted: #5a6865;
+  --line: #d3dcda;
+  --land: #e2e9e7;
+  --land-off: #eceeee;
+  --accent: #0e6aa8;
+  --accent-soft: #d6e7f3;
+  --wire: #9aaaa6;
+  --coal: #7a4a22;
+  --oil: #2b2b2b;
+  --garbage: #c9a200;
+  --uranium: #cc3434;
+  --eco: #2f9a4c;
+  --hybrid: #4a3a2e;
+  --p0: #d23f3f;
+  --p1: #2a67c9;
+  --p2: #2b9a55;
+  --p3: #c98a00;
+  --p4: #8a4fc4;
+  --p5: #3b3f46;
+  --font-display: "Saira Condensed", "Arial Narrow", "Roboto Condensed", sans-serif;
+  --font-body: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
+  --font-data: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1514; --panel: #161e1d; --ink: #e3ebe9; --muted: #93a39f; --line: #2a3533;
+    --land: #1b2524; --land-off: #141a19; --accent: #5fb0e8; --accent-soft: #173247; --wire: #4c5c59;
+    --coal: #b0763f; --oil: #9a9a9a; --garbage: #e5bf2a; --uranium: #ef5b5b; --eco: #4cc06a; --hybrid: #8c7461;
+    --p0: #f06161; --p1: #5b92f0; --p2: #4cc07a; --p3: #f0b429; --p4: #b07ff0; --p5: #b8bec7;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1514; --panel: #161e1d; --ink: #e3ebe9; --muted: #93a39f; --line: #2a3533;
+  --land: #1b2524; --land-off: #141a19; --accent: #5fb0e8; --accent-soft: #173247; --wire: #4c5c59;
+  --coal: #b0763f; --oil: #9a9a9a; --garbage: #e5bf2a; --uranium: #ef5b5b; --eco: #4cc06a; --hybrid: #8c7461;
+  --p0: #f06161; --p1: #5b92f0; --p2: #4cc07a; --p3: #f0b429; --p4: #b07ff0; --p5: #b8bec7;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; }
+body {
+  background: var(--bg); color: var(--ink); font: 15px/1.45 var(--font-body);
+  padding: 16px 16px 96px;
+}
+h1, h2, h3 { font-family: var(--font-display); font-weight: 600; margin: 0; text-wrap: balance; }
+.label { font: 600 11px/1.2 var(--font-body); text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.num { font-family: var(--font-data); font-variant-numeric: tabular-nums; }
+.wrap { max-width: 1440px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+
+/* header */
+.top { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px; }
+.top h1 { font-size: 30px; line-height: 1; letter-spacing: .01em; }
+.top h1 span { color: var(--muted); font-weight: 500; }
+.status { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border: 1px solid var(--line);
+  border-radius: 999px; background: var(--panel); font-size: 13px; white-space: nowrap; }
+.chip b { font-family: var(--font-data); font-weight: 600; }
+.chip.phase { background: var(--accent-soft); border-color: transparent; color: var(--ink); }
+
+.grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 960px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; min-width: 0; }
+.col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+
+/* map */
+.mapbox { padding: 6px; }
+#map { width: 100%; height: auto; display: block; max-height: 82vh; }
+#map text { font-family: var(--font-body); fill: var(--ink); }
+.region { fill: var(--land); stroke: none; }
+.edge { stroke: var(--wire); stroke-width: 1.4; }
+.edge.off { stroke: var(--line); stroke-dasharray: 2 3; }
+.cost { font: 600 8.5px var(--font-data) !important; fill: var(--muted) !important; }
+.costbg { fill: var(--panel); }
+.city .badge { fill: var(--panel); stroke: var(--wire); stroke-width: 1; }
+.city.off .badge { fill: var(--land-off); stroke: var(--line); }
+.city.off text { fill: var(--muted) !important; opacity: .55; }
+.city text.name { font-size: 10px; font-weight: 600; paint-order: stroke; stroke: var(--bg); stroke-width: 3px; }
+.slot { stroke: var(--wire); stroke-width: .8; fill: var(--land); }
+.slot.locked { opacity: .35; }
+.city.off .slot { opacity: .25; }
+.city.hot .badge { stroke: var(--accent); stroke-width: 2.2; }
+.flash { fill: none; stroke: var(--accent); stroke-width: 2; opacity: 0; }
+.flash.on { animation: ping .9s ease-out; }
+@keyframes ping { from { opacity: .9; r: 10; } to { opacity: 0; r: 34; } }
+@media (prefers-reduced-motion: reduce) { .flash.on { animation: none; } }
+
+/* move + thinking */
+.move { display: flex; flex-direction: column; gap: 10px; }
+.move-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.dot { width: 12px; height: 12px; border-radius: 50%; flex: none; }
+.move-text { font: 600 22px/1.15 var(--font-display); min-width: 0; overflow-wrap: anywhere; }
+.move-who { color: var(--muted); font-size: 13px; }
+.think { display: flex; flex-direction: column; gap: 5px; }
+.bar { display: grid; grid-template-columns: minmax(0, 1fr) 52px; gap: 8px; align-items: center; font-size: 13px; }
+.bar .track { position: relative; height: 22px; border-radius: 4px; background: var(--bg); overflow: hidden; }
+.bar .fill { position: absolute; inset: 0 auto 0 0; background: var(--accent-soft); }
+.bar.chosen .fill { background: var(--accent); opacity: .35; }
+.bar .txt { position: relative; padding: 0 8px; line-height: 22px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+.bar.chosen .txt { font-weight: 600; }
+.bar .pct { text-align: right; font-family: var(--font-data); font-size: 12px; color: var(--muted); }
+.note { font-size: 13px; color: var(--muted); }
+.auction { font-size: 14px; padding: 8px 10px; border-radius: 6px; background: var(--bg); }
+
+/* players */
+.players { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; }
+.player { border: 1px solid var(--line); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 8px;
+  border-top: 4px solid var(--pc); background: var(--panel); min-width: 0; }
+.player.active { box-shadow: 0 0 0 2px var(--pc); }
+.player .ph { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; min-width: 0; }
+.player .pname { font: 600 17px/1.1 var(--font-display); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.player .seat { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; }
+.stat .v { font: 600 16px var(--font-data); font-variant-numeric: tabular-nums; }
+.plants { display: flex; flex-wrap: wrap; gap: 5px; }
+.fuel { display: flex; gap: 10px; font-size: 13px; flex-wrap: wrap; }
+.fuel span { display: inline-flex; align-items: center; gap: 4px; }
+.cube { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+.winner-tag { font: 600 11px var(--font-body); letter-spacing: .06em; text-transform: uppercase; color: var(--pc); }
+
+/* plant cards */
+.card { width: 54px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); overflow: hidden; flex: none;
+  display: flex; flex-direction: column; font-size: 11px; }
+.card .n { font: 700 17px/1 var(--font-display); color: #fff; padding: 4px 6px 3px; background: var(--k); }
+.card .io { padding: 3px 6px; font-family: var(--font-data); white-space: nowrap; }
+.card.ga .n { color: #2a2200; }
+.card.future { opacity: .55; }
+.card.pick { outline: 2.5px solid var(--accent); outline-offset: 1px; }
+.card.hy .n { background: linear-gradient(135deg, var(--coal) 50%, var(--oil) 50%); }
+
+/* markets */
+.markets { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 16px; }
+@media (max-width: 760px) { .markets { grid-template-columns: minmax(0, 1fr); } }
+.mk { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.fuelrow { display: grid; grid-template-columns: 70px minmax(0, 1fr) 64px; gap: 8px; align-items: center; font-size: 13px; }
+.meter { height: 10px; border-radius: 5px; background: var(--bg); overflow: hidden; }
+.meter i { display: block; height: 100%; }
+
+/* chart + log */
+#chart { width: 100%; height: auto; display: block; }
+#chart text { font: 11px var(--font-data); fill: var(--muted); }
+.gridline { stroke: var(--line); stroke-width: 1; }
+.cursor { stroke: var(--ink); stroke-width: 1; stroke-dasharray: 3 3; }
+.legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 5px; }
+.log { max-height: 340px; overflow: auto; font-size: 13px; border-top: 1px solid var(--line); }
+.log div { display: grid; grid-template-columns: 44px 12px minmax(0, 1fr); gap: 8px; align-items: center; padding: 3px 4px; cursor: pointer; border-radius: 4px; }
+.log div:hover { background: var(--bg); }
+.log div.cur { background: var(--accent-soft); }
+.log .rd { font-family: var(--font-data); font-size: 11px; color: var(--muted); }
+.log .rh { display: block; font: 600 12px var(--font-display); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 8px 4px 2px; cursor: default; }
+.log .rh:hover { background: none; }
+
+/* controls */
+.controls { position: fixed; left: 0; right: 0; bottom: 0; z-index: 5; background: var(--panel); border-top: 1px solid var(--line);
+  padding: 10px 16px calc(10px + env(safe-area-inset-bottom, 0px)); }
+.controls .in { max-width: 1440px; margin: 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+button, select { font: 600 13px var(--font-body); color: var(--ink); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button:focus-visible, select:focus-visible, input:focus-visible, .log div:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.primary { background: var(--accent); color: var(--panel); border-color: var(--accent); min-width: 64px; }
+#scrub { flex: 1 1 240px; min-width: 0; accent-color: var(--accent); }
+.pos { font: 12px var(--font-data); color: var(--muted); white-space: nowrap; }
+.btns { display: flex; gap: 6px; flex-wrap: wrap; }
+.keys { font-size: 12px; color: var(--muted); }
+@media (max-width: 640px) { .keys { display: none; } }
+/* live play */
+.lobby { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 860px) { .lobby { grid-template-columns: minmax(0, 1fr); } }
+.form { display: flex; flex-direction: column; gap: 12px; }
+.seatrow { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 10px; align-items: center; }
+.seatrow .dot { width: 14px; height: 14px; }
+input[type="text"], input[type="number"], input:not([type]) { font: 14px var(--font-body); color: var(--ink); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px; width: 100%; min-width: 0; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.err { color: var(--uranium); font-size: 13px; }
+.list { display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
+.list a { color: var(--accent); text-decoration: none; overflow-wrap: anywhere; }
+.list a:hover { text-decoration: underline; }
+.yourturn { border: 2px solid var(--accent); }
+.acts { display: flex; flex-wrap: wrap; gap: 6px; }
+.acts button { font-weight: 400; }
+.acts button.go { font-weight: 600; background: var(--accent); color: var(--panel); border-color: var(--accent); }
+.city.legal { cursor: pointer; }
+.city.legal .badge { stroke: var(--accent); stroke-width: 2; stroke-dasharray: 3 2; }
+.city.legal:hover .badge { fill: var(--accent-soft); }
+a.plain { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <div class="label" id="sub">Power Grid Recharged · Germany</div>
+      <h1><span id="titletxt">Power Grid Replay</span> <span id="seedlbl"></span></h1>
+    </div>
+    <div class="status" id="status"></div>
+  </header>
+
+  <section class="lobby" id="lobby" hidden>
+    <form class="panel form" id="newgame">
+      <h2 style="font-size:22px">New game</h2>
+      <div class="note">Choose who sits in each seat. <b>human</b> is you; with no human seat you just watch.
+        Type any agent name the bots accept, including <code>rl:</code> or <code>mcts:</code> checkpoints under runs/.</div>
+      <div class="row">
+        <button type="button" id="presetPlay">Me against the best bots</button>
+        <button type="button" id="presetWatch">Watch the best bots</button>
+      </div>
+      <div class="row"><label class="label" for="nseats">Players</label>
+        <select id="nseats"><option>2</option><option>3</option><option selected>4</option><option>5</option><option>6</option></select>
+        <label class="label" for="seed">Seed</label><input id="seed" type="number" placeholder="random" style="width:120px">
+      </div>
+      <div id="seats" class="form"></div>
+      <datalist id="agentlist"></datalist>
+      <div class="row"><button type="submit" class="primary" id="startBtn">Start game</button><span class="err" id="lobbyErr"></span></div>
+    </form>
+    <div class="col">
+      <section class="panel form"><h2 style="font-size:19px">Games on this server</h2><div class="list" id="gamelist"></div></section>
+      <section class="panel form"><h2 style="font-size:19px">Recorded replays</h2><div class="list" id="replaylist"></div></section>
+    </div>
+  </section>
+
+  <div class="col" id="game">
+  <div class="grid">
+    <div class="panel mapbox"><svg id="map" role="img" aria-label="Map of Germany with each player's houses"></svg></div>
+    <div class="col">
+      <section class="panel move" id="turn" hidden></section>
+      <section class="panel move" id="move" aria-live="polite"></section>
+      <section class="players" id="players"></section>
+    </div>
+  </div>
+
+  <section class="panel markets">
+    <div class="mk">
+      <div class="label">Power plant market <span id="deck"></span></div>
+      <div class="plants" id="market"></div>
+    </div>
+    <div class="mk">
+      <div class="label">Resource market · units left and next price</div>
+      <div id="fuelmk"></div>
+    </div>
+  </section>
+
+  <div class="grid">
+    <section class="panel mk">
+      <h2 style="font-size:19px">Each network's estimate of its own win share</h2>
+      <div class="note">Value head output at each of its decisions. Scripted bots and humans don't estimate anything. Click to jump.</div>
+      <svg id="chart" viewBox="0 0 640 220" role="img" aria-label="Win share estimates over the game"></svg>
+      <div class="legend" id="legend"></div>
+    </section>
+    <section class="panel mk">
+      <h2 style="font-size:19px">Moves</h2>
+      <div class="log" id="log" tabindex="0"></div>
+    </section>
+  </div>
+  </div>
+</div>
+
+<nav class="controls" aria-label="Playback" id="controls">
+  <div class="in">
+    <div class="btns">
+      <button id="bStart" title="First move">⏮</button>
+      <button id="bPrevR" title="Previous round (Shift+←)">« Round</button>
+      <button id="bPrev" title="Previous move (←)">‹</button>
+      <button id="bPlay" class="primary" title="Play / pause (Space)">Play</button>
+      <button id="bNext" title="Next move (→)">›</button>
+      <button id="bNextR" title="Next round (Shift+→)">Round »</button>
+      <button id="bEnd" title="Latest position">⏭</button>
+    </div>
+    <label class="label" for="speed">Speed</label>
+    <select id="speed">
+      <option value="1200">Slow</option>
+      <option value="500" selected>Normal</option>
+      <option value="150">Fast</option>
+      <option value="40">Very fast</option>
+    </select>
+    <label class="label" for="skipBots"><input type="checkbox" id="skipBots"> Only network moves</label>
+    <input type="range" id="scrub" min="0" value="0" aria-label="Move">
+    <span class="pos" id="pos"></span>
+    <span class="keys">← → step · Shift jumps a round · Space plays</span>
+  </div>
+</nav>
+
+<script>
+const DATA = /*__REPLAY_DATA__*/null;
+const LIVE = /*__LIVE__*/null;
+
+const FUELS = ["coal", "oil", "garbage", "uranium"];
+const FUEL_CAP = [24, 24, 24, 12];
+const PHASES = {
+  AUCTION_SELECT: "Auction · choose a plant", AUCTION_BID: "Auction · bidding", AUCTION_DISCARD: "Discard a plant",
+  BUY_FUEL: "Buy resources", BUILD: "Build", BUREAUCRACY: "Bureaucracy", CHANCE: "Deck", TERMINAL: "Game over",
+};
+// Longitude/latitude of each city, nudged apart where the board's clusters are tighter than real geography.
+const GEO = {
+  "Flensburg": [9.44, 54.78], "Kiel": [10.13, 54.32], "Hamburg": [9.99, 53.55], "Hannover": [9.73, 52.37],
+  "Bremen": [8.80, 53.08], "Wilhelmshaven": [8.12, 53.53], "Cuxhaven": [8.69, 53.86], "Lübeck": [10.75, 53.9],
+  "Rostock": [12.10, 54.09], "Schwerin": [11.40, 53.63], "Stralsund": [13.08, 54.31], "Magdeburg": [11.63, 52.12],
+  "Berlin": [13.40, 52.52], "Frankfurt (Oder)": [14.55, 52.34], "Halle": [11.75, 51.62], "Leipzig": [12.55, 51.3],
+  "Dresden": [13.74, 51.05], "Erfurt": [11.03, 50.98], "Fulda": [9.68, 50.55], "Würzburg": [9.93, 49.79],
+  "Nürnberg": [11.08, 49.45], "Osnabrück": [8.05, 52.28], "Münster": [7.63, 52.0], "Essen": [7.05, 51.62],
+  "Duisburg": [6.4, 51.55], "Dortmund": [7.75, 51.45], "Düsseldorf": [6.5, 51.13], "Kassel": [9.48, 51.31],
+  "Aachen": [6.08, 50.7], "Köln": [7.05, 50.85], "Trier": [6.64, 49.75], "Mainz": [8.0, 49.93],
+  "Frankfurt (Main)": [8.85, 50.15], "Saarbrücken": [7.0, 49.24], "Mannheim": [8.47, 49.45], "Freiburg": [7.85, 47.99],
+  "Stuttgart": [9.18, 48.78], "Konstanz": [9.18, 47.66], "Augsburg": [10.90, 48.37], "Regensburg": [12.10, 49.01],
+  "München": [11.58, 48.14], "Passau": [13.43, 48.57],
+};
+const PX = 108, LON0 = 5.55, LAT0 = 55.1, COSLAT = Math.cos(51 * Math.PI / 180);
+const proj = ([lon, lat]) => [(lon - LON0) * COSLAT * PX + 24, (LAT0 - lat) * PX + 20];
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const pc = (p) => `var(--p${p})`;
+const HUMAN = (LIVE && LIVE.human) || "human";
+
+function shortName(a) {
+  if (a === HUMAN) return "You";
+  if (a.startsWith("mcts:")) {
+    const [, sims, path, value] = a.split(":");
+    return `search ${sims.split("+")[0]} · ${ckpt(path)}${value ? " + " + ckpt(value).split("/")[0] : ""}`;
+  }
+  if (a.startsWith("rl:")) return `network · ${ckpt(a.slice(3))}`;
+  return a;
+}
+function ckpt(path) {
+  const parts = path.split("/"); const f = parts.pop().replace(/\.pt$/, "");
+  return (parts.pop() || "") + "/" + f;
+}
+const ord = (n) => (n === 1 ? "st" : n === 2 ? "nd" : n === 3 ? "rd" : "th");
+function pretty(t) {
+  if (!t) return "";
+  return t.replace(/^PASS\/DROP$/, "Pass").replace(/^BID (\d+)$/, "Bid $$$1").replace(/^SELECT plant #/, "Put up plant #")
+    .replace(/^BUY (\w+)$/, (_, k) => "Buy 1 " + k.toLowerCase()).replace(/^BUILD (.+) for (\d+)$/, "Build in $1 ($$$2)")
+    .replace(/^RUN plant/, "Power with plant").replace(/^DISCARD plant/, "Discard plant").replace(/^DONE$/, "Done");
+}
+function fuelAbbr(kind) { return { coal: "C", oil: "O", garbage: "G", uranium: "U", hybrid: "C/O" }[kind] || ""; }
+function plantCard(p, extra = "") {
+  const kind = p.kind === "hybrid" ? "coal" : p.kind;
+  const cls = p.kind === "hybrid" ? " hy" : p.kind === "garbage" ? " ga" : "";
+  const need = p.need ? `${p.need}${fuelAbbr(p.kind)}` : "free";
+  return `<div class="card${cls} ${extra}" style="--k:var(--${kind in { coal: 1, oil: 1, garbage: 1, uranium: 1, eco: 1 } ? kind : "muted"})" title="#${p.number}: ${p.kind}, burns ${p.need}, powers ${p.power}">
+    <div class="n">${p.number}</div><div class="io">${need}→${p.power}⌂</div></div>`;
+}
+function thinkHTML(t, chosen, actor) {
+  const title = t.kind === "visits" ? `Search visits (${t.sims} simulations)` : t.kind === "prior" ? "Network policy (no search in this phase)" : "Network policy";
+  let html = `<div class="label">${title}</div><div class="think">` + t.top.map(([m, p]) => `
+    <div class="bar${m === chosen ? " chosen" : ""}"><div class="track"><div class="fill" style="width:${(p * 100).toFixed(1)}%"></div>
+    <span class="txt">${esc(pretty(m))}</span></div><div class="pct">${(p * 100).toFixed(1)}%</div></div>`).join("") + "</div>";
+  if (t.kind === "visits" && t.prior && t.prior.length) {
+    const pr = t.prior.find(([m]) => m === chosen);
+    html += `<div class="note">Before searching, the network gave this move ${pr ? (pr[1] * 100).toFixed(1) + "%" : "under " + (t.prior[t.prior.length - 1][1] * 100).toFixed(1) + "%"}.</div>`;
+  }
+  html += `<div class="note">Estimated final win share for this seat: <b class="num">${(t.value * 100).toFixed(1)}%</b>` +
+    (t.values ? ` · others: ${t.values.map((v, p) => p === actor ? "" : `<span style="color:${pc(p)}">P${p} ${(v * 100).toFixed(0)}%</span>`).filter(Boolean).join(" · ")}` : "") + "</div>";
+  return html;
+}
+
+// ---------------- game state on the page ----------------
+let F = [], N = 0, B = null, AGENTS = [], RETURNS = null, cityIdx = {}, isNet = [];
+let live = null;            // {id, turn, over, error} for a game on the server
+const firstBuilt = {}, roundStart = [], series = {};
+let cur = 0, timer = null, playing = false;
+
+// ---------------- map ----------------
+const svgNS = "http://www.w3.org/2000/svg";
+const el = (tag, attrs, parent) => {
+  const e = document.createElementNS(svgNS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+};
+let pos, edgeEls, regionEls, cityEls;
+function buildMap() {
+  pos = B.cities.map((c) => proj(GEO[c] || [10, 51]));
+  const map = $("map");
+  const W = Math.max(...pos.map((p) => p[0])) + 40, H = Math.max(...pos.map((p) => p[1])) + 34;
+  map.setAttribute("viewBox", `0 0 ${W.toFixed(0)} ${H.toFixed(0)}`);
+  const gRegion = el("g", {}, map), gEdge = el("g", {}, map), gCost = el("g", {}, map), gCity = el("g", {}, map);
+  edgeEls = B.edges.map(([a, b, w]) => {
+    const [x1, y1] = pos[a], [x2, y2] = pos[b];
+    const line = el("line", { x1, y1, x2, y2, class: "edge" }, gEdge);
+    const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+    const g = el("g", {}, gCost);
+    if (w > 0) {
+      el("circle", { cx: mx, cy: my, r: 7, class: "costbg" }, g);
+      el("text", { x: mx, y: my + 3, "text-anchor": "middle", class: "cost" }, g).textContent = w;
+    }
+    return { line, g, a, b };
+  });
+  regionEls = B.cities.map((c, i) => el("circle", { cx: pos[i][0], cy: pos[i][1], r: 44, class: "region" }, gRegion));
+  cityEls = B.cities.map((name, i) => {
+    const [x, y] = pos[i];
+    const g = el("g", { class: "city", transform: `translate(${x},${y})` }, gCity);
+    el("rect", { x: -20, y: -7.5, width: 40, height: 15, rx: 7.5, class: "badge" }, g);
+    const slots = [-13, 0, 13].map((sx) => el("circle", { cx: sx, cy: 0, r: 5, class: "slot" }, g));
+    el("text", { x: 0, y: 19, "text-anchor": "middle", class: "name" }, g).textContent = name;
+    const flash = el("circle", { cx: 0, cy: 0, r: 10, class: "flash" }, g);
+    const title = el("title", {}, g);
+    g.addEventListener("click", () => { const a = legalBuild[i]; if (a !== undefined) sendMove(a); });
+    return { g, slots, flash, title };
+  });
+}
+
+// ---------------- frames, log, chart ----------------
+const logEl = $("log"), logRows = [];
+function appendFrames(fs) {
+  let lastRound = F.length ? F[F.length - 1].state.round : null;
+  const frag = document.createDocumentFragment();
+  for (const f of fs) {
+    const i = F.length;
+    F.push(f);
+    f.state.players.forEach((pl, p) => pl.cities.forEach((c) => {
+      const k = c + ":" + p; if (!(k in firstBuilt)) firstBuilt[k] = i;
+    }));
+    if (!i || f.state.round !== lastRound) {
+      roundStart.push(i);
+      if (i) {
+        const h = document.createElement("div"); h.className = "rh"; h.textContent = `Round ${f.state.round}`;
+        frag.appendChild(h);
+      }
+      lastRound = f.state.round;
+    }
+    if (f.think && f.actor >= 0) (series[f.actor] = series[f.actor] || []).push([i, f.think.value]);
+    const d = document.createElement("div");
+    const color = f.actor >= 0 ? pc(f.actor) : "var(--line)";
+    d.innerHTML = `<span class="rd">${i}</span><span class="dot" style="background:${color}"></span><span>${f.actor >= 0 ? `P${f.actor} ` : ""}${esc(pretty(f.text))}</span>`;
+    d.addEventListener("click", () => { stop(); render(i, true); });
+    frag.appendChild(d);
+    logRows[i] = d;
+  }
+  logEl.appendChild(frag);
+  $("scrub").max = Math.max(0, F.length - 1);
+  drawChart();
+}
+
+const chart = $("chart");
+const CW = 640, CH = 220, ML = 36, MR = 10, MT = 10, MB = 26;
+let cursorLine;
+// Live games grow: scale the x axis to at least ~600 moves so early points don't stretch across the chart.
+const xSpan = () => Math.max(1, F.length - 1, live && !live.over ? 600 : 0);
+const cx = (i) => ML + (CW - ML - MR) * i / xSpan();
+const cy = (v) => MT + (CH - MT - MB) * (1 - Math.max(0, Math.min(1, v)));
+function drawChart() {
+  chart.innerHTML = "";
+  for (const v of [0, 0.25, 0.5, 0.75, 1]) {
+    el("line", { x1: ML, x2: CW - MR, y1: cy(v), y2: cy(v), class: "gridline" }, chart);
+    el("text", { x: ML - 6, y: cy(v) + 4, "text-anchor": "end" }, chart).textContent = Math.round(v * 100) + "%";
+  }
+  const everyR = Math.max(1, Math.ceil(roundStart.length / 10));
+  roundStart.forEach((i, k) => {
+    if (k % everyR) return;
+    el("text", { x: cx(i), y: CH - 8, "text-anchor": "middle" }, chart).textContent = "R" + F[i].state.round;
+  });
+  if (N) el("line", { x1: ML, x2: CW - MR, y1: cy(1 / N), y2: cy(1 / N), class: "gridline", "stroke-dasharray": "4 4" }, chart);
+  Object.entries(series).forEach(([p, pts]) => {
+    el("path", {
+      d: pts.map(([i, v], k) => (k ? "L" : "M") + cx(i).toFixed(1) + "," + cy(v).toFixed(1)).join(""),
+      fill: "none", stroke: pc(p), "stroke-width": 1.8, "stroke-linejoin": "round",
+    }, chart);
+    const [li, lv] = pts[pts.length - 1];
+    el("circle", { cx: cx(li), cy: cy(lv), r: 3, fill: pc(p) }, chart);
+  });
+  cursorLine = el("line", { x1: cx(cur), x2: cx(cur), y1: MT, y2: CH - MB, class: "cursor" }, chart);
+  $("legend").innerHTML = (Object.keys(series).length
+    ? Object.keys(series).map((p) => `<span><i class="dot" style="background:${pc(p)}"></i>P${p} ${esc(shortName(AGENTS[p]))}</span>`).join("")
+    : "<span>No network estimates yet.</span>") + `<span>dashed line: 1/${N}, an average player</span>`;
+}
+chart.addEventListener("click", (e) => {
+  if (!F.length) return;
+  const r = chart.getBoundingClientRect();
+  const x = (e.clientX - r.left) * CW / r.width;
+  stop(); render(Math.min(F.length - 1, Math.round(Math.max(0, (x - ML) / (CW - ML - MR)) * xSpan())), true);
+});
+
+// ---------------- rendering ----------------
+function parseCity(text) {
+  const m = /^BUILD (.+?) for \d+/.exec(text || "");
+  return m ? cityIdx[m[1]] : undefined;
+}
+function parsePlant(text) {
+  const m = /(?:plant )?#(\d+)/.exec(text || "");
+  return m ? +m[1] : undefined;
+}
+function latestEstimate(i) {
+  const out = {};
+  for (let k = i; k >= 0 && Object.keys(out).length < N; k--) {
+    const f = F[k];
+    if (f.think && f.actor >= 0 && !(f.actor in out)) out[f.actor] = f.think.value;
+  }
+  return out;
+}
+const atLatest = () => cur === F.length - 1;
+const myTurn = () => live && live.turn && AGENTS[live.turn.seat] === HUMAN;
+let legalBuild = {};
+
+function render(i, animate) {
+  if (!F.length) return;
+  cur = i;
+  const f = F[i], s = f.state, prev = F[Math.max(0, i - 1)].state;
+  const regions = s.regions || [];        // null until the regions are drawn at the start
+  const active = new Set(regions);
+  const cityOn = B.city_region.map((r) => !regions.length || active.has(r));
+  const done = !!RETURNS && i === F.length - 1;
+
+  $("status").innerHTML = [
+    `<span class="chip">Round <b>${s.round}</b></span>`,
+    `<span class="chip">Step <b>${s.step}</b></span>`,
+    `<span class="chip phase">${done ? "Game over" : esc(PHASES[s.phase] || s.phase)}</span>`,
+    `<span class="chip">Order ${s.order.map((p) => `<i class="dot" style="background:${pc(p)}" title="P${p}"></i>`).join("")}</span>`,
+    live && !live.over && !atLatest() ? `<button id="toLive">Back to live</button>` : "",
+  ].join("");
+  if ($("toLive")) $("toLive").onclick = () => { render(F.length - 1); play(); };
+
+  // which cities the human may click to build in
+  legalBuild = {};
+  if (myTurn() && atLatest()) live.turn.legal.forEach(([a, t]) => { const c = parseCity(t); if (c !== undefined) legalBuild[c] = a; });
+
+  regionEls.forEach((c, k) => { c.style.opacity = cityOn[k] ? 1 : 0.35; });
+  edgeEls.forEach((e) => {
+    const on = cityOn[e.a] && cityOn[e.b];
+    e.line.setAttribute("class", on ? "edge" : "edge off");
+    e.g.style.opacity = on ? 1 : 0.3;
+  });
+  const hot = parseCity(f.text);
+  cityEls.forEach((c, k) => {
+    const owners = [];
+    s.players.forEach((pl, p) => { if (pl.cities.includes(k)) owners.push(p); });
+    owners.sort((a, b) => firstBuilt[k + ":" + a] - firstBuilt[k + ":" + b]);
+    c.slots.forEach((sl, j) => {
+      const o = owners[j];
+      sl.style.fill = o === undefined ? "" : pc(o);
+      sl.style.stroke = o === undefined ? "" : pc(o);
+      sl.setAttribute("class", "slot" + (o === undefined && j >= s.step ? " locked" : ""));
+    });
+    c.g.setAttribute("class", "city" + (cityOn[k] ? "" : " off") + (k === hot ? " hot" : "") + (k in legalBuild ? " legal" : ""));
+    c.title.textContent = `${B.cities[k]} (${B.regions[B.city_region[k]]})` +
+      (owners.length ? ": " + owners.map((p) => "P" + p).join(", ") : "") +
+      (k in legalBuild ? " · click to build" : "");
+    if (animate && k === hot) { c.flash.classList.remove("on"); void c.flash.getBBox(); c.flash.classList.add("on"); }
+  });
+
+  // the move just made, and what the network thought
+  const actor = f.actor;
+  const who = actor === null ? "" : actor < 0 ? "Deck" : `P${actor} · ${esc(shortName(AGENTS[actor]))}`;
+  let html = `<div class="label">Move ${i} of ${F.length - 1}${live && !live.over ? " so far" : ""}</div>
+    <div class="move-head">${actor !== null && actor >= 0 ? `<span class="dot" style="background:${pc(actor)}"></span>` : ""}
+      <div style="min-width:0"><div class="move-text">${esc(pretty(f.text))}</div><div class="move-who">${who}</div></div></div>`;
+  if (f.think) html += thinkHTML(f.think, f.text, actor);
+  else if (actor !== null && actor >= 0 && isNet[actor]) html += `<div class="note">Only one legal move, so the network wasn't asked.</div>`;
+  const au = s.auction;
+  if (au && au.plant !== null && au.plant !== undefined && au.plant >= 0) {
+    html += `<div class="auction">Auction for <b>#${au.plant}</b> · high bid <b class="num">${au.bid || "–"}</b>` +
+      (au.high !== null && au.high !== undefined && au.high >= 0 ? ` by <span style="color:${pc(au.high)}">P${au.high}</span>` : "") +
+      ` · still in: ${au.ring.map((p) => `<span style="color:${pc(p)}">P${p}</span>`).join(", ")}</div>`;
+  }
+  if (done) {
+    const w = RETURNS.map((r, p) => [r, p]).filter(([r]) => r > 0).map(([, p]) => `<span style="color:${pc(p)}">P${p} ${esc(shortName(AGENTS[p]))}</span>`);
+    html += `<div class="auction">Winner: ${w.join(", ")}</div>`;
+  }
+  if (live && live.error) html += `<div class="err">The game stopped on the server: ${esc(live.error.split("\n").filter(Boolean).pop())}</div>`;
+  $("move").innerHTML = html;
+  renderTurn();
+
+  // players
+  const winners = new Set((RETURNS || []).map((r, p) => (r > 0 ? p : -1)));
+  const lastEst = latestEstimate(i);
+  $("players").innerHTML = s.players.map((pl, p) => {
+    const dm = pl.money - prev.players[p].money;
+    return `<article class="player${s.current_player === p ? " active" : ""}" style="--pc:${pc(p)}">
+      <div class="ph"><div class="pname" title="${esc(AGENTS[p])}">${esc(shortName(AGENTS[p]))}</div>
+        <div class="seat">P${p} · ${s.order.indexOf(p) + 1}${ord(s.order.indexOf(p) + 1)} in order</div></div>
+      ${done && winners.has(p) ? '<div class="winner-tag">Winner</div>' : ""}
+      <div class="stats">
+        <div class="stat"><div class="label">Money</div><div class="v">${pl.money}${dm ? `<span class="note"> ${dm > 0 ? "+" : ""}${dm}</span>` : ""}</div></div>
+        <div class="stat"><div class="label">Cities</div><div class="v">${pl.cities.length}</div></div>
+        <div class="stat"><div class="label">Powered</div><div class="v">${pl.powered}</div></div>
+        <div class="stat"><div class="label">Own est.</div><div class="v">${lastEst[p] === undefined ? "–" : Math.round(lastEst[p] * 100) + "%"}</div></div>
+      </div>
+      <div class="plants">${pl.plants.map((c) => plantCard(c)).join("") || '<span class="note">No plants</span>'}</div>
+      <div class="fuel">${FUELS.map((k, j) => `<span title="${k}"><i class="cube" style="background:var(--${k})"></i><span class="num">${pl.stored[j]}</span></span>`).join("")}</div>
+    </article>`;
+  }).join("");
+
+  // markets
+  const pick = au && au.plant >= 0 ? au.plant : parsePlant(f.text);
+  $("market").innerHTML = s.market.map((c) => plantCard(c, (c.current ? "" : "future") + (c.number === pick ? " pick" : ""))).join("");
+  $("deck").textContent = `· ${s.stack_cards} cards in the deck${s.discount ? ` · #${s.discount} discounted` : ""}`;
+  $("fuelmk").innerHTML = FUELS.map((k, j) => `<div class="fuelrow"><span>${k}</span>
+    <div class="meter"><i style="width:${(100 * s.fuel_market[j] / FUEL_CAP[j]).toFixed(0)}%;background:var(--${k})"></i></div>
+    <span class="num">${s.fuel_market[j]} · ${s.fuel_price[j] < 0 ? "sold out" : "$" + s.fuel_price[j]}</span></div>`).join("");
+
+  // controls, log, chart cursor
+  $("scrub").value = i;
+  $("pos").textContent = `${i} / ${F.length - 1}`;
+  const prevCur = logEl.querySelector(".cur");
+  if (prevCur) prevCur.classList.remove("cur");
+  const row = logRows[i];
+  if (row) {
+    row.classList.add("cur");
+    const top = row.offsetTop - logEl.offsetTop, h = logEl.clientHeight;
+    if (top < logEl.scrollTop || top > logEl.scrollTop + h - 24) logEl.scrollTop = top - h / 2;
+  }
+  if (cursorLine) { cursorLine.setAttribute("x1", cx(i)); cursorLine.setAttribute("x2", cx(i)); }
+}
+
+// ---------------- your move (live games) ----------------
+let sending = false, hint = null;
+function renderTurn() {
+  const box = $("turn");
+  if (!myTurn()) { box.hidden = true; return; }
+  box.hidden = false;
+  const seat = live.turn.seat;
+  if (!atLatest()) {
+    box.innerHTML = `<div class="move-head"><span class="dot" style="background:${pc(seat)}"></span><div class="move-text">Your move as P${seat}</div></div>
+      <div class="note">The bots have moved since the position you're looking at.</div>
+      <div class="row"><button class="primary" id="catchUp">Show me the current position</button></div>`;
+    $("catchUp").onclick = () => { stop(); render(F.length - 1); };
+    return;
+  }
+  const groups = {};
+  const bids = [];
+  for (const [a, t] of live.turn.legal) {
+    const k = t.split(" ")[0];
+    if (k === "BID") bids.push([+t.split(" ")[1], a]);
+    else (groups[k] = groups[k] || []).push([a, t]);
+  }
+  const order = [["SELECT", "Put a plant up for auction"], ["DISCARD", "Discard a plant"], ["BUY", "Buy resources"],
+    ["BUILD", "Build (or click a highlighted city)"], ["RUN", "Power cities"]];
+  let html = `<div class="move-head"><span class="dot" style="background:${pc(seat)}"></span>
+    <div class="move-text">Your move as P${seat}</div></div>`;
+  if (bids.length) {
+    bids.sort((x, y) => x[0] - y[0]);
+    const lo = bids[0][0], hi = bids[bids.length - 1][0];
+    const quick = [lo, lo + 1, lo + 2, lo + 5, lo + 10].filter((v, k, arr) => v <= hi && arr.indexOf(v) === k);
+    html += `<div class="label">Bid ($${lo}–$${hi})</div><div class="acts">` +
+      quick.map((v) => `<button data-bid="${v}">$${v}</button>`).join("") +
+      `<input id="bidAmt" type="number" min="${lo}" max="${hi}" value="${lo}" style="width:90px" aria-label="Bid amount">
+       <button class="go" id="bidGo">Bid</button></div>`;
+  }
+  for (const [k, title] of order) {
+    if (!groups[k]) continue;
+    let items = groups[k];
+    if (k === "BUILD") items = items.slice().sort((x, y) => +x[1].split(" for ").pop() - +y[1].split(" for ").pop());
+    html += `<div class="label">${title}</div><div class="acts">` +
+      items.map(([a, t]) => `<button data-a="${a}">${esc(pretty(t).replace(/^(Put up plant|Build in|Power with plant|Discard plant) /, ""))}</button>`).join("") + "</div>";
+  }
+  const rest = Object.entries(groups).filter(([k]) => !order.some(([o]) => o === k)).flatMap(([, v]) => v);
+  if (rest.length) html += `<div class="acts">` + rest.map(([a, t]) => `<button class="go" data-a="${a}">${esc(pretty(t))}</button>`).join("") + "</div>";
+  html += `<div class="row"><button id="hintBtn">What would the best bot play?</button></div><div id="hintBox" class="think"></div>`;
+  box.innerHTML = html;
+  box.querySelectorAll("[data-a]").forEach((b) => (b.onclick = () => sendMove(+b.dataset.a)));
+  const bidMap = Object.fromEntries(bids);
+  box.querySelectorAll("[data-bid]").forEach((b) => (b.onclick = () => sendMove(bidMap[+b.dataset.bid])));
+  if ($("bidGo")) $("bidGo").onclick = () => {
+    const v = +$("bidAmt").value;
+    if (v in bidMap) sendMove(bidMap[v]); else $("bidAmt").setCustomValidity("Not a legal bid"), $("bidAmt").reportValidity();
+  };
+  $("hintBtn").onclick = askHint;
+  if (hint && hint.seen === F.length) showHint();
+}
+async function askHint() {
+  $("hintBox").innerHTML = '<div class="note">Thinking…</div>';
+  try {
+    const r = await fetch(`api/games/${live.id}/hint`);
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error);
+    hint = { ...j, seen: F.length };
+    showHint();
+  } catch (e) { $("hintBox").innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+}
+function showHint() {
+  const box = $("hintBox");
+  if (!box) return;
+  box.innerHTML = `<div class="note">${esc(shortName(hint.advisor))} would play <b>${esc(pretty(hint.action))}</b>.</div>` +
+    (hint.think ? thinkHTML(hint.think, hint.action, live.turn.seat) : "");
+}
+async function sendMove(a) {
+  if (sending || !myTurn() || !atLatest()) return;
+  sending = true;
+  $("turn").querySelectorAll("button").forEach((b) => (b.disabled = true));
+  try {
+    const r = await fetch(`api/games/${live.id}/move`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: a, seen: F.length }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error);
+    live.turn = null;
+    hint = null;
+    play();
+    await poll();
+  } catch (e) {
+    $("turn").insertAdjacentHTML("beforeend", `<div class="err">${esc(e.message)}</div>`);
+    sending = false;
+    poll().catch(() => {});      // resync with the server
+  } finally { sending = false; }
+}
+
+// ---------------- playback ----------------
+const onlyNet = () => $("skipBots").checked;
+function nextIndex(i, dir) {
+  let k = i + dir;
+  if (onlyNet()) while (k > 0 && k < F.length - 1 && !F[k].think) k += dir;
+  return Math.max(0, Math.min(F.length - 1, k));
+}
+function step(dir) { render(nextIndex(cur, dir), true); }
+function jumpRound(dir) {
+  const k = dir > 0 ? roundStart.find((r) => r > cur) : [...roundStart].reverse().find((r) => r < cur);
+  render(k === undefined ? (dir > 0 ? F.length - 1 : 0) : k, true);
+}
+function stop() { clearTimeout(timer); timer = null; playing = false; $("bPlay").textContent = "Play"; }
+function play() {
+  if (playing) return;
+  if (!live && cur >= F.length - 1) render(0);
+  playing = true;
+  $("bPlay").textContent = "Pause";
+  const tick = () => {
+    if (cur < F.length - 1) {
+      step(1);
+      // the deck and forced moves go by quickly
+      const f = F[cur];
+      timer = setTimeout(tick, f.actor === -1 ? Math.min(150, +$("speed").value) : +$("speed").value);
+    } else if (live && !live.over) {
+      timer = setTimeout(tick, 200);       // wait for the server
+    } else stop();
+  };
+  timer = setTimeout(tick, +$("speed").value);
+}
+$("bPlay").onclick = () => (playing ? stop() : play());
+$("bNext").onclick = () => { stop(); step(1); };
+$("bPrev").onclick = () => { stop(); step(-1); };
+$("bNextR").onclick = () => { stop(); jumpRound(1); };
+$("bPrevR").onclick = () => { stop(); jumpRound(-1); };
+$("bStart").onclick = () => { stop(); render(0); };
+$("bEnd").onclick = () => { stop(); render(F.length - 1); };
+$("scrub").oninput = (e) => { stop(); render(+e.target.value); };
+document.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "SELECT" || (e.target.tagName === "INPUT" && e.target.type !== "checkbox")) return;
+  if (!F.length) return;
+  if (e.key === "ArrowRight") { e.preventDefault(); stop(); e.shiftKey ? jumpRound(1) : step(1); }
+  else if (e.key === "ArrowLeft") { e.preventDefault(); stop(); e.shiftKey ? jumpRound(-1) : step(-1); }
+  else if (e.key === " ") { e.preventDefault(); playing ? stop() : play(); }
+});
+
+function setup(board, agents, seed) {
+  B = board; AGENTS = agents; N = agents.length;
+  cityIdx = Object.fromEntries(B.cities.map((c, i) => [c, i]));
+  isNet = AGENTS.map((a) => a.startsWith("rl:") || a.startsWith("mcts:"));
+  $("seedlbl").textContent = `· seed ${seed}`;
+  buildMap();
+}
+
+// ---------------- live: lobby and polling ----------------
+// One request at a time: two overlapping polls would both append the same new moves, and the page
+// would then be ahead of the server and every move it sends would be rejected as stale.
+let polling = null;
+function poll() {
+  if (!polling) polling = fetchNew().finally(() => { polling = null; });
+  return polling;
+}
+async function fetchNew() {
+  const since = F.length;
+  const r = await fetch(`api/games/${live.id}?since=${since}`);
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error);
+  const fresh = j.frames.slice(F.length - since);     // in case anything arrived meanwhile
+  const wasLatest = !F.length || atLatest();
+  const hadTurn = !!live.turn;
+  Object.assign(live, { turn: j.turn, over: j.over, error: j.error });
+  if (j.returns) RETURNS = j.returns;
+  if (fresh.length) appendFrames(fresh);
+  if (fresh.length || hadTurn !== !!live.turn || j.over || j.error) {
+    if (!playing && wasLatest) render(F.length - 1); else render(cur);
+  }
+  return j;
+}
+async function startLive(id) {
+  live = { id, turn: null, over: false, error: null };
+  $("titletxt").textContent = "Power Grid Live";
+  document.title = "Power Grid Live";
+  $("sub").innerHTML = `Power Grid Recharged · Germany · <a class="plain" href="./">lobby</a>`;
+  let first;
+  try {
+    const r = await fetch(`api/games/${id}?since=0`);
+    first = await r.json();
+    if (!r.ok) throw new Error(first.error);
+  } catch (e) { return showLobby(e.message); }
+  setup(LIVE.board, first.agents, first.seed);
+  const human = first.agents.includes(HUMAN);
+  $("speed").value = human ? "150" : "500";
+  Object.assign(live, { turn: first.turn, over: first.over, error: first.error });
+  RETURNS = first.returns;
+  appendFrames(first.frames);
+  if (human || first.over) render(F.length - 1); else { render(0); play(); }
+  const loop = async () => {
+    try { await poll(); } catch (e) { /* server restarting or network blip: keep trying */ }
+    if (!live.over && !live.error) setTimeout(loop, live.turn ? 2000 : 700);
+  };
+  setTimeout(loop, 700);
+}
+
+function showLobby(msg) {
+  $("game").hidden = true; $("controls").hidden = true;
+  $("lobby").hidden = false;
+  document.body.style.paddingBottom = "16px";
+  $("titletxt").textContent = "Power Grid Live";
+  document.title = "Power Grid Live";
+  if (msg) $("lobbyErr").textContent = msg;
+  const cat = LIVE.catalog;
+  $("agentlist").innerHTML = [HUMAN, ...cat].map((a) => `<option value="${esc(a)}">${esc(shortName(a))}</option>`).join("");
+  const best = cat[0], second = cat.find((a) => a.startsWith("rl:runs/league3")) || cat[1];
+  const defaults = (play) => [play ? HUMAN : best, play ? best : second, best, "builder", "planner", "tycoon"];
+  const drawSeats = (names) => {
+    const n = +$("nseats").value;
+    const old = [...document.querySelectorAll("#seats input")].map((x) => x.value);
+    names = names || defaults(true).map((d, k) => old[k] || d);
+    $("seats").innerHTML = Array.from({ length: n }, (_, k) => `<div class="seatrow">
+      <label for="seat${k}" class="row" style="gap:4px"><i class="dot" style="background:${pc(k)}"></i>P${k}</label>
+      <input id="seat${k}" list="agentlist" value="${esc(names[k])}" autocomplete="off" spellcheck="false"></div>`).join("");
+  };
+  $("nseats").onchange = () => drawSeats();
+  $("presetPlay").onclick = () => drawSeats(defaults(true));
+  $("presetWatch").onclick = () => drawSeats(defaults(false));
+  drawSeats(defaults(true));
+  $("newgame").onsubmit = async (e) => {
+    e.preventDefault();
+    $("startBtn").disabled = true;
+    $("lobbyErr").textContent = "Loading the bots…";
+    try {
+      const agents = [...document.querySelectorAll("#seats input")].map((x) => x.value.trim());
+      const r = await fetch("api/games", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agents, seed: $("seed").value }),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error);
+      location.search = "?game=" + j.id;
+    } catch (err) { $("lobbyErr").textContent = err.message; $("startBtn").disabled = false; }
+  };
+  fetch("api/games").then((r) => r.json()).then((gs) => {
+    $("gamelist").innerHTML = gs.length ? gs.map((g) => `<div><a href="?game=${g.id}">${g.agents.map((a) => esc(shortName(a))).join(" · ")}</a>
+      <div class="note">round ${g.round}, ${g.moves} moves · ${g.over ? "finished" : g.waiting ? "waiting for you" : "in progress"}</div></div>`).join("")
+      : '<div class="note">No games yet.</div>';
+  }).catch(() => {});
+  fetch("api/replays").then((r) => r.json()).then((fs) => {
+    $("replaylist").innerHTML = fs.length ? fs.map((f) => `<a href="replays/${encodeURIComponent(f)}">${esc(f)}</a>`).join("")
+      : '<div class="note">None yet. Record one with <code>python -m tools.replay</code>.</div>';
+  }).catch(() => {});
+}
+
+// ---------------- boot ----------------
+if (DATA) {
+  setup(DATA.board, DATA.agents, DATA.seed);
+  RETURNS = DATA.returns;
+  appendFrames(DATA.frames);
+  // Open on the first move a network made, so the model's view is visible straight away.
+  const firstThink = F.findIndex((f) => f.think);
+  render(firstThink > 0 ? firstThink : 0);
+} else if (LIVE) {
+  const id = new URLSearchParams(location.search).get("game");
+  if (id) startLive(id); else showLobby();
+} else {
+  $("game").innerHTML = '<div class="panel">No replay data in this file. Generate one with <code>python -m tools.replay</code>.</div>';
+}
+</script>
+</body>
+</html>

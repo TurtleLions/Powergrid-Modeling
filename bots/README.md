@@ -38,6 +38,13 @@ The player count is a parameter everywhere; the default is 4.
     # rate everything on one Elo scale (scripted styles are included by default)
     $PY -m bots.rating --runs runs/league3 --games 10000
 
+    # watch one game in a browser: map, markets, move log, and what each network thought
+    $PY -m tools.replay --agents rl:runs/league3/champion.pt,balanced,builder,tycoon --seed 1
+    # -> runs/replays/game_1.html
+
+    # play against the bots, or watch them live, in a browser (lobby at http://<host>:8765/)
+    $PY -m tools.play_server --port 8765
+
     # can the trained bot win against anyone? Worst case over opponent types
     $PY -m bots.evaluate rl:runs/league/champion.pt --games 400
 
