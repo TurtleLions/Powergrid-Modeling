@@ -1,0 +1,546 @@
+P0: SELECT plant #10
+P0: BID 10
+P1: PASS/DROP
+P2: PASS/DROP
+P3: PASS/DROP
+P2: SELECT plant #5 (discounted: minimum bid 1)
+P2: BID 1
+P3: PASS/DROP
+P1: PASS/DROP
+P1: SELECT plant #8
+P1: BID 8
+P3: BID 9
+P1: BID 10
+P3: PASS/DROP
+P3: SELECT plant #9
+P2: BUY COAL
+P2: BUY COAL
+P2: BUY COAL
+P2: BUY COAL
+P1: BUY COAL
+P1: BUY COAL
+P1: BUY COAL
+P1: BUY COAL
+P1: DONE
+P3: BUY OIL
+P3: BUY OIL
+P0: BUY COAL
+P0: BUY COAL
+P0: DONE
+P2: BUILD Mainz for 10
+P2: BUILD Fulda for 18
+P2: DONE
+P1: BUILD Halle for 10
+P1: BUILD Erfurt for 16
+P3: BUILD Mannheim for 10
+P3: BUILD Würzburg for 20
+P0: BUILD Berlin for 10
+P0: BUILD Frankfurt (Oder) for 16
+P0: RUN plant #10 with 2 coal
+P3: RUN plant #9 with 1 oil
+P1: RUN plant #8 with 3 coal
+P2: RUN plant #5 with 2 coal + 0 oil
+P0: SELECT plant #13
+P0: BID 13
+P1: BID 14
+P2: BID 15
+P3: BID 16
+P0: BID 17
+P1: PASS/DROP
+P2: PASS/DROP
+P3: PASS/DROP
+P3: SELECT plant #12
+P3: BID 12
+P1: PASS/DROP
+P2: PASS/DROP
+P1: SELECT plant #15
+P1: BID 15
+P2: BID 16
+P1: BID 17
+P2: BID 18
+P1: BID 19
+P2: BID 20
+P1: BID 21
+P2: BID 22
+P1: PASS/DROP
+P1: PASS/DROP
+P2: BUY COAL
+P2: DONE
+P1: BUY COAL
+P1: BUY COAL
+P1: BUY COAL
+P1: DONE
+P3: BUY OIL
+P3: DONE
+P0: BUY COAL
+P0: BUY COAL
+P0: DONE
+P2: BUILD Frankfurt (Main) for 10
+P1: BUILD Magdeburg for 21
+P0: RUN plant #10 with 2 coal
+P0: DONE
+P3: RUN plant #12 with 0 coal + 2 oil
+P1: RUN plant #8 with 3 coal
+P2: RUN plant #15 with 2 coal
+P2: SELECT plant #18
+P2: BID 20
+P3: PASS/DROP
+P0: PASS/DROP
+P1: BID 21
+P2: BID 22
+P1: BID 23
+P2: PASS/DROP
+P2: SELECT plant #21
+P2: BID 21
+P3: PASS/DROP
+P0: BID 22
+P2: PASS/DROP
+P2: SELECT plant #27
+P2: BID 27
+P3: BID 28
+P2: BID 29
+P3: BID 30
+P2: BID 31
+P3: BID 32
+P2: BID 33
+P3: PASS/DROP
+P3: SELECT plant #33
+P3: DONE
+P0: BUY OIL
+P0: BUY OIL
+P0: DONE
+P1: BUY COAL
+P1: BUY COAL
+P1: DONE
+P2: DONE
+P1: BUILD Leipzig for 10
+P2: RUN plant #27 with no fuel
+P1: RUN plant #8 with 3 coal
+P1: RUN plant #18 with no fuel
+P0: RUN plant #21 with 0 coal + 2 oil
+P0: DONE
+P3: RUN plant #33 with no fuel
+P1: SELECT plant #26
+P1: BID 26
+P2: BID 27
+P3: PASS/DROP
+P0: PASS/DROP
+P1: BID 28
+P2: BID 29
+P1: BID 30
+P2: BID 31
+P1: BID 32
+P2: BID 33
+P1: PASS/DROP
+P2: DISCARD plant #5
+P1: SELECT plant #34
+P1: BID 34
+P3: PASS/DROP
+P0: PASS/DROP
+P3: PASS/DROP
+P0: PASS/DROP
+P0: BUY OIL
+P0: BUY OIL
+P0: BUY OIL
+P0: BUY OIL
+P0: DONE
+P3: BUY COAL
+P3: BUY COAL
+P3: DONE
+P2: DONE
+P1: BUY COAL
+P1: BUY URANIUM
+P1: DONE
+P0: BUILD Dresden for 26
+P3: BUILD Stuttgart for 16
+P3: BUILD Saarbrücken for 26
+P1: RUN plant #34 with 1 uranium
+P1: RUN plant #18 with no fuel
+P2: RUN plant #27 with no fuel
+P3: RUN plant #33 with no fuel
+P3: RUN plant #12 with 2 coal + 0 oil
+P0: RUN plant #21 with 0 coal + 2 oil
+P0: DONE
+P1: PASS/DROP
+P3: PASS/DROP
+P2: PASS/DROP
+P0: PASS/DROP
+P0: BUY COAL
+P0: BUY COAL
+P0: DONE
+P2: BUY OIL
+P2: BUY OIL
+P2: BUY COAL
+P2: BUY COAL
+P2: DONE
+P3: BUY OIL
+P3: DONE
+P1: BUY COAL
+P1: BUY COAL
+P1: BUY COAL
+P1: BUY COAL
+P1: BUY COAL
+P1: DONE
+P0: BUILD Stralsund for 25
+P0: BUILD Schwerin for 28
+P2: BUILD Nürnberg for 29
+P2: BUILD Regensburg for 22
+P3: BUILD Augsburg for 25
+P3: BUILD München for 16
+P1: DONE
+P1: RUN plant #18 with no fuel
+P1: RUN plant #8 with 3 coal
+P3: RUN plant #33 with no fuel
+P3: RUN plant #9 with 1 oil
+P2: RUN plant #26 with 2 oil
+P2: RUN plant #27 with no fuel
+P2: RUN plant #15 with 2 coal
+P0: RUN plant #13 with no fuel
+P0: RUN plant #21 with 2 coal + 0 oil
+P3: SELECT plant #19 (discounted: minimum bid 1)
+P3: BID 1
+P0: PASS/DROP
+P1: PASS/DROP
+P2: PASS/DROP
+P3: DISCARD plant #9
+P2: PASS/DROP
+P0: SELECT plant #29
+P0: BID 29
+P1: PASS/DROP
+P0: DISCARD plant #10
+P1: PASS/DROP
+P1: BUY COAL
+P1: BUY COAL
+P1: BUY COAL
+P1: DONE
+P0: BUY OIL
+P0: DONE
+P2: BUY OIL
+P2: BUY OIL
+P2: BUY OIL
+P2: BUY OIL
+P2: BUY COAL
+P2: DONE
+P3: BUY OIL
+P3: BUY GARBAGE
+P3: BUY GARBAGE
+P3: BUY COAL
+P3: BUY COAL
+P3: BUY GARBAGE
+P3: BUY GARBAGE
+P3: DONE
+P1: DONE
+P0: BUILD Lübeck for 16
+P0: BUILD Rostock for 16
+P2: BUILD Trier for 28
+P2: BUILD Aachen for 29
+P3: BUILD Passau for 24
+P3: DONE
+P3: RUN plant #33 with no fuel
+P3: RUN plant #12 with 2 coal + 0 oil
+P3: RUN plant #19 with 2 garbage
+P2: RUN plant #27 with no fuel
+P2: RUN plant #26 with 2 oil
+P2: RUN plant #15 with 2 coal
+P0: RUN plant #21 with 0 coal + 2 oil
+P0: RUN plant #29 with 0 coal + 1 oil
+P0: DONE
+P1: RUN plant #18 with no fuel
+P1: RUN plant #8 with 3 coal
+P3: PASS/DROP
+P0: SELECT plant #25
+P0: BID 25
+P1: PASS/DROP
+P2: PASS/DROP
+P0: DISCARD plant #13
+P2: PASS/DROP
+P1: PASS/DROP
+P1: BUY COAL
+P1: BUY COAL
+P1: BUY COAL
+P1: DONE
+P2: BUY OIL
+P2: BUY OIL
+P2: BUY COAL
+P2: BUY COAL
+P2: BUY COAL
+P2: DONE
+P0: BUY OIL
+P0: BUY OIL
+P0: BUY OIL
+P0: BUY COAL
+P0: BUY COAL
+P0: DONE
+P3: BUY GARBAGE
+P3: BUY GARBAGE
+P3: DONE
+P1: BUILD Fulda for 28
+P1: BUILD Mainz for 23
+P1: BUILD Frankfurt (Main) for 15
+P1: DONE
+P2: BUILD Erfurt for 28
+P2: BUILD Halle for 21
+P2: BUILD Köln for 17
+P0: BUILD Magdeburg for 25
+P3: BUILD Nürnberg for 23
+P3: BUILD Regensburg for 25
+P3: BUILD Leipzig for 42
+P3: RUN plant #19 with 2 garbage
+P3: RUN plant #33 with no fuel
+P0: RUN plant #21 with 2 coal + 0 oil
+P0: RUN plant #29 with 0 coal + 1 oil
+P2: RUN plant #26 with 2 oil
+P2: RUN plant #27 with no fuel
+P2: RUN plant #15 with 2 coal
+P1: RUN plant #18 with no fuel
+P1: RUN plant #8 with 3 coal
+P3: PASS/DROP
+P2: PASS/DROP
+P0: PASS/DROP
+P1: PASS/DROP
+P1: BUY URANIUM
+P1: BUY COAL
+P1: BUY COAL
+P1: BUY COAL
+P1: BUY URANIUM
+P0: BUY OIL
+P0: BUY COAL
+P0: BUY COAL
+P0: DONE
+P2: BUY OIL
+P2: BUY OIL
+P2: BUY COAL
+P2: BUY COAL
+P2: DONE
+P3: BUY OIL
+P3: BUY GARBAGE
+P3: BUY GARBAGE
+P3: BUY OIL
+P3: BUY OIL
+P1: BUILD Mannheim for 26
+P1: BUILD Würzburg for 25
+P1: BUILD Saarbrücken for 25
+P1: BUILD Stuttgart for 21
+P0: DONE
+P2: BUILD München for 25
+P2: BUILD Augsburg for 21
+P2: BUILD Dresden for 28
+P3: BUILD Trier for 26
+P3: BUILD Berlin for 32
+P3: BUILD Frankfurt (Oder) for 21
+P3: RUN plant #12 with 0 coal + 2 oil
+P3: RUN plant #19 with 2 garbage
+P3: RUN plant #33 with no fuel
+P2: RUN plant #26 with 2 oil
+P2: RUN plant #15 with 2 coal
+P2: RUN plant #27 with no fuel
+P0: RUN plant #21 with 2 coal + 0 oil
+P0: RUN plant #29 with 0 coal + 1 oil
+P1: RUN plant #8 with 3 coal
+P1: RUN plant #18 with no fuel
+P1: RUN plant #34 with 1 uranium
+P3: SELECT plant #36
+P3: BID 38
+P0: BID 39
+P1: PASS/DROP
+P2: PASS/DROP
+P3: BID 40
+P0: BID 50
+P3: PASS/DROP
+P0: DISCARD plant #21
+P3: SELECT plant #31
+P3: BID 31
+P1: PASS/DROP
+P2: PASS/DROP
+P3: DISCARD plant #12
+P2: SELECT plant #39
+P2: BID 41
+P1: BID 42
+P2: BID 43
+P1: BID 44
+P2: PASS/DROP
+P1: DISCARD plant #8
+P2: SELECT plant #44
+P2: DISCARD plant #15
+P0: BUY COAL
+P0: BUY COAL
+P0: BUY COAL
+P0: BUY COAL
+P0: BUY COAL
+P0: DONE
+P1: BUY URANIUM
+P1: DONE
+P2: BUY OIL
+P2: BUY OIL
+P3: BUY COAL
+P3: BUY COAL
+P3: BUY COAL
+P3: BUY COAL
+P3: DONE
+P0: BUILD Leipzig for 31
+P0: BUILD Halle for 20
+P0: BUILD Erfurt for 26
+P0: BUILD Fulda for 33
+P1: BUILD Berlin for 30
+P1: BUILD Nürnberg for 28
+P2: BUILD Würzburg for 28
+P2: BUILD Magdeburg for 31
+P3: BUILD Frankfurt (Main) for 30
+P3: RUN plant #31 with 3 coal
+P3: RUN plant #19 with 2 garbage
+P3: RUN plant #33 with no fuel
+P2: RUN plant #26 with 2 oil
+P2: RUN plant #44 with no fuel
+P2: DONE
+P1: RUN plant #34 with 1 uranium
+P1: RUN plant #39 with 1 uranium
+P1: RUN plant #18 with no fuel
+P0: RUN plant #25 with 2 coal
+P0: RUN plant #36 with 3 coal
+P0: DONE
+P2: SELECT plant #40
+P2: BID 42
+P3: BID 45
+P0: PASS/DROP
+P1: PASS/DROP
+P2: BID 46
+P3: BID 47
+P2: BID 48
+P3: BID 49
+P2: BID 50
+P3: BID 51
+P2: BID 52
+P3: BID 53
+P2: BID 54
+P3: BID 57
+P2: BID 58
+P3: BID 59
+P2: BID 60
+P3: BID 61
+P2: BID 62
+P3: PASS/DROP
+P2: DISCARD plant #27
+P3: SELECT plant #32
+P3: BID 32
+P0: PASS/DROP
+P1: PASS/DROP
+P3: DISCARD plant #19
+P1: SELECT plant #46
+P1: BID 46
+P0: PASS/DROP
+P1: DISCARD plant #18
+P0: PASS/DROP
+P0: BUY COAL
+P0: BUY COAL
+P0: BUY COAL
+P0: BUY COAL
+P0: BUY COAL
+P0: DONE
+P1: BUY OIL
+P1: BUY OIL
+P1: BUY OIL
+P1: BUY OIL
+P1: BUY OIL
+P1: BUY URANIUM
+P1: BUY OIL
+P1: DONE
+P3: BUY COAL
+P3: BUY COAL
+P3: BUY OIL
+P3: BUY OIL
+P3: BUY OIL
+P3: DONE
+P2: BUY OIL
+P2: BUY OIL
+P2: DONE
+P0: BUILD Mainz for 28
+P0: BUILD Saarbrücken for 30
+P0: BUILD Mannheim for 31
+P1: DONE
+P3: BUILD Aachen for 34
+P3: BUILD Köln for 22
+P2: BUILD Passau for 27
+P2: RUN plant #26 with 2 oil
+P2: RUN plant #40 with 2 oil
+P2: RUN plant #44 with no fuel
+P3: RUN plant #33 with no fuel
+P3: RUN plant #32 with 3 oil
+P3: RUN plant #31 with 3 coal
+P1: RUN plant #34 with 1 uranium
+P1: RUN plant #46 with 0 coal + 3 oil
+P0: RUN plant #29 with 1 coal + 0 oil
+P0: RUN plant #25 with 2 coal
+P2: SELECT plant #38
+P2: BID 40
+P3: BID 43
+P0: PASS/DROP
+P1: PASS/DROP
+P2: BID 46
+P3: BID 49
+P2: BID 52
+P3: BID 55
+P2: BID 58
+P3: BID 61
+P2: BID 64
+P3: BID 69
+P2: BID 70
+P3: BID 75
+P2: BID 80
+P3: BID 85
+P2: PASS/DROP
+P3: DISCARD plant #31
+P2: SELECT plant #50
+P2: BID 52
+P0: PASS/DROP
+P1: BID 53
+P2: BID 58
+P1: BID 59
+P2: BID 64
+P1: BID 65
+P2: BID 70
+P1: BID 71
+P2: BID 76
+P1: BID 77
+P2: BID 82
+P1: BID 83
+P2: BID 88
+P1: PASS/DROP
+P2: DISCARD plant #26
+P0: PASS/DROP
+P1: PASS/DROP
+P1: BUY URANIUM
+P1: BUY URANIUM
+P1: BUY URANIUM
+P1: BUY URANIUM
+P1: BUY OIL
+P1: DONE
+P0: BUY COAL
+P0: BUY COAL
+P0: BUY COAL
+P0: DONE
+P3: BUY OIL
+P3: BUY OIL
+P3: BUY GARBAGE
+P3: BUY GARBAGE
+P3: BUY GARBAGE
+P3: BUY GARBAGE
+P3: BUY OIL
+P3: BUY GARBAGE
+P3: BUY OIL
+P3: BUY OIL
+P3: BUY GARBAGE
+P3: DONE
+P2: BUY OIL
+P2: BUY OIL
+P2: DONE
+P1: BUILD Schwerin for 31
+P1: BUILD Lübeck for 21
+P1: BUILD Dresden for 33
+P1: BUILD Frankfurt (Oder) for 26
+P1: BUILD Rostock for 21
+P0: BUILD Stuttgart for 26
+P0: DONE
+P3: DONE
+P2: BUILD Konstanz for 27
+P2: BUILD Freiburg for 24
+GAME OVER P0 (YOU): powered 16, $60, share 0.0; P1: powered 18, $15, share 1.0; P2: powered 17, $11, share 0.0; P3: powered 16, $39, share 0.0
